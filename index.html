@@ -1,0 +1,479 @@
+<!--
+  Copyright 2026 Manifold Tech Ltd.
+  Author: MENG Guotao <mengguotao@manifoldtech.cn>
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MindCloud World Fly</title>
+    <script src="https://cdn.jsdelivr.net/npm/playcanvas@2.16.2/build/playcanvas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+
+        #app-canvas { width: 100%; height: 100%; display: block; }
+
+        /* Logo */
+        #game-logo {
+            position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+            height: 5vh; z-index: 200; pointer-events: none;
+            opacity: 0.9; border: none; border-radius: 4px; padding: 0;
+            box-shadow: 0 0 6px 4px rgba(255,255,255,0.9), 0 0 14px 8px rgba(255,255,255,0.5), 0 0 24px 14px rgba(255,255,255,0.2), 0 0 36px 20px rgba(255,255,255,0.05);
+        }
+
+        /* Drop zone overlay */
+        #drop-zone {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background: rgba(0,0,0,0.85); color: #fff; z-index: 100;
+            transition: opacity 0.3s;
+        }
+        #drop-zone.hidden { display: none; }
+        #drop-zone h1 { font-size: 2em; margin-bottom: 0.5em; }
+        #drop-zone p { font-size: 1.1em; color: #aaa; margin-bottom: 1.5em; }
+        #drop-zone.dragover { background: rgba(30,120,255,0.3); }
+        #file-picker-btn {
+            padding: 12px 32px; font-size: 1.1em; border: 2px solid #4af; background: transparent;
+            color: #4af; border-radius: 8px; cursor: pointer; transition: all 0.2s;
+        }
+        #file-picker-btn:hover { background: #4af; color: #000; }
+        #file-input { display: none; }
+
+        /* Key Guide */
+        #key-guide {
+            position: absolute; top: 50%; left: 16px; transform: translateY(-50%);
+            z-index: 15; pointer-events: none;
+            background: rgba(0,0,0,0.5); border-radius: 8px; padding: 12px 16px;
+            font-family: 'Courier New', monospace; font-size: 12px; color: #ccc;
+            line-height: 1.6; white-space: pre; display: none;
+        }
+        #key-guide.visible { display: block; }
+        #key-guide .guide-title {
+            color: #4af; font-weight: bold; font-size: 13px; margin-bottom: 4px;
+        }
+        #key-guide kbd {
+            background: rgba(255,255,255,0.15); border-radius: 3px;
+            padding: 1px 5px; font-size: 11px; color: #fff;
+        }
+
+        /* HUD */
+        #hud {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10; color: #0f0;
+            font-family: 'Courier New', monospace; font-size: 14px;
+        }
+        #hud-top-left { position: absolute; top: 16px; left: 16px; }
+        #hud-top-right { position: absolute; top: 16px; right: 16px; text-align: right; }
+        #hud-bottom-center { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); text-align: center; }
+        #hud-bottom-left { position: absolute; bottom: 16px; left: 16px; }
+        .hud-label { color: #0a0; font-size: 11px; }
+        .hud-value { color: #0f0; font-size: 16px; font-weight: bold; }
+        .hud-warn { color: #f44; }
+
+
+        /* Collision flash */
+        #collision-flash {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,0,0,0.3); pointer-events: none; z-index: 9;
+            opacity: 0; transition: opacity 0.1s;
+        }
+        #collision-flash.active { opacity: 1; }
+
+        /* Attitude indicator */
+        #attitude-indicator {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 160px; height: 160px; border: 2px solid rgba(0,255,0,0.3);
+            border-radius: 50%; pointer-events: none;
+        }
+
+        /* Settings panel */
+        #settings-panel {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 520px; max-height: 80vh; overflow-y: auto;
+            background: rgba(20,20,30,0.95); border: 1px solid #4af; border-radius: 12px;
+            padding: 24px; z-index: 200; display: none; pointer-events: auto; color: #ddd;
+        }
+        #settings-panel.visible { display: block; }
+        #settings-panel h2 { color: #4af; margin-bottom: 16px; font-size: 1.3em; }
+        #settings-panel h3 { color: #8cf; margin: 16px 0 8px; font-size: 1em; }
+        .setting-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .setting-row label { flex: 1; }
+        .setting-row .controls { display: flex; align-items: center; gap: 8px; }
+        .assign-btn {
+            padding: 4px 12px; background: #335; border: 1px solid #4af; color: #4af;
+            border-radius: 4px; cursor: pointer; font-size: 12px; pointer-events: auto;
+        }
+        .assign-btn:hover { background: #4af; color: #000; }
+        .assign-btn.listening { background: #f80; border-color: #f80; color: #000; animation: pulse 0.8s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .axis-label { color: #8cf; min-width: 60px; text-align: center; font-size: 13px; }
+        input[type="checkbox"] { accent-color: #4af; }
+        input[type="range"] { width: 80px; accent-color: #4af; }
+        .deadzone-val { min-width: 36px; text-align: right; font-size: 12px; color: #aaa; }
+        #close-settings-btn {
+            position: absolute; top: 12px; right: 16px; background: none; border: none;
+            color: #aaa; font-size: 20px; cursor: pointer; pointer-events: auto;
+        }
+        #close-settings-btn:hover { color: #fff; }
+
+        /* Gear button */
+        #gear-btn {
+            position: absolute; bottom: 16px; right: 16px; z-index: 20;
+            background: rgba(0,0,0,0.5); border: 1px solid #666; color: #ccc;
+            width: 36px; height: 36px; border-radius: 50%; cursor: pointer;
+            font-size: 18px; display: flex; align-items: center; justify-content: center;
+        }
+        #gear-btn:hover { background: rgba(60,60,80,0.8); color: #fff; }
+
+        /* Armed indicator */
+        #armed-indicator {
+            position: absolute; top: 50%; right: 16px; transform: translateY(-50%);
+            padding: 6px 16px; border-radius: 4px; font-weight: bold; font-size: 14px;
+            z-index: 10; pointer-events: none;
+        }
+        #armed-indicator.armed { background: rgba(0,200,0,0.3); color: #0f0; border: 1px solid #0f0; }
+        #armed-indicator.disarmed { background: rgba(200,0,0,0.3); color: #f44; border: 1px solid #f44; }
+
+        /* Scene filter overlay */
+        #filter-overlay {
+            position: absolute; bottom: 0; left: 0; width: 100%;
+            display: none; justify-content: center; z-index: 160; color: #fff;
+            pointer-events: none;
+        }
+        #filter-overlay > * { pointer-events: auto; }
+        #filter-overlay.visible { display: flex; }
+        #filter-panel {
+            background: rgba(20,20,30,0.85); border: 1px solid #4af; border-radius: 10px 10px 0 0;
+            padding: 12px 24px; width: 80vw;
+            display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+        }
+        #filter-panel h2 { color: #4af; font-size: 1em; margin: 0; white-space: nowrap; }
+        #filter-panel p { display: none; }
+        #filter-dist-slider, #filter-opacity-slider { flex: 1; min-width: 100px; accent-color: #4af; margin: 0; }
+        .filter-num-input {
+            width: 60px; background: #112; color: #fff; border: 1px solid #446;
+            border-radius: 4px; padding: 2px 6px; font-size: 12px; text-align: center;
+            font-family: 'Courier New', monospace;
+        }
+        #filter-stats { color: #8cf; font-size: 12px; font-family: 'Courier New', monospace; margin: 0; }
+        #filter-apply-btn {
+            padding: 6px 18px; font-size: 0.9em; border: 1px solid #4af; background: transparent;
+            color: #4af; border-radius: 6px; cursor: pointer; transition: all 0.2s; margin: 0;
+        }
+        #filter-apply-btn:hover { background: #4af; color: #000; }
+        #filter-guide {
+            position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.5); border-radius: 6px; padding: 6px 16px;
+            font-family: 'Courier New', monospace; font-size: 12px; color: #ccc;
+            white-space: nowrap; pointer-events: none; z-index: 161;
+            display: none;
+        }
+
+        /* Loading overlay */
+        #loading-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); display: none; align-items: center;
+            justify-content: center; z-index: 150; color: #fff; font-size: 1.2em;
+        }
+        #loading-overlay.visible { display: flex; }
+
+        /* Placement mode overlay */
+        #placement-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 11; display: none;
+        }
+        #placement-overlay.visible { display: block; }
+        #placement-instructions {
+            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); color: #fff; padding: 12px 24px;
+            border-radius: 8px; font-size: 14px; text-align: center;
+            border: 1px solid rgba(68,170,255,0.4);
+        }
+        #placement-instructions kbd {
+            background: #335; padding: 2px 6px; border-radius: 3px;
+            border: 1px solid #557; color: #4af; font-family: monospace;
+        }
+        #placement-mode-label {
+            position: absolute; bottom: 140px; left: 50%; transform: translateX(-50%);
+            background: rgba(68,170,255,0.2); color: #4af; padding: 6px 20px;
+            border-radius: 4px; font-size: 16px; font-weight: bold;
+            border: 1px solid #4af;
+        }
+        #spawn-marker {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 20px; height: 20px; display: none; pointer-events: none;
+        }
+        #spawn-marker::before, #spawn-marker::after {
+            content: ''; position: absolute; background: #f80;
+        }
+        #spawn-marker::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
+        #spawn-marker::after { width: 100%; height: 2px; top: 50%; transform: translateY(-50%); }
+        #spawn-coords {
+            position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%);
+            color: #4af; font-family: 'Courier New', monospace; font-size: 13px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="app-canvas"></canvas>
+
+    <!-- Logo -->
+    <img id="game-logo" src="mt_mcwf_logo.jpg" alt="MindCloud World Fly">
+
+    <!-- Drop zone for PLY file -->
+    <div id="drop-zone">
+        <h1>MindCloud World Fly</h1>
+        <p>Drop a .ply, .sog or .splat Gaussian Splat file here, or click to browse</p>
+        <button id="file-picker-btn">Choose File</button>
+        <input type="file" id="file-input" accept=".ply,.sog,.splat">
+        <p style="margin-top: 2em; font-size: 0.85em; color: #666;">
+            Controls: WASD + Arrow Keys | RC Transmitter via USB | Tab for settings
+        </p>
+    </div>
+
+    <!-- Scene filter guide (above panel) -->
+    <div id="filter-guide"><b>Left-drag</b> orbit &nbsp;|&nbsp; <b>Scroll</b> zoom &nbsp;|&nbsp; Adjust sliders below, then click <b>Apply</b></div>
+    <!-- Scene filter overlay -->
+    <div id="filter-overlay">
+        <div id="filter-panel">
+            <h2>Filter</h2>
+            <label style="font-size:12px;color:#aaa;">Dist</label>
+            <input type="range" id="filter-dist-slider" min="1" max="1000" value="500" step="1">
+            <input type="number" id="filter-dist-input" class="filter-num-input" value="500" min="1" max="1000" step="1">
+            <label style="font-size:12px;color:#aaa;margin-left:8px;">Opacity</label>
+            <input type="range" id="filter-opacity-slider" min="0" max="1" value="0" step="0.01">
+            <input type="number" id="filter-opacity-input" class="filter-num-input" value="0" min="0" max="1" step="0.01">
+            <div id="filter-stats">Calculating...</div>
+            <label id="filter-coord-label" style="font-size:12px;color:#aaa;margin-left:8px;">Up Axis</label>
+            <select id="filter-coord-select" style="background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 6px;font-size:12px;">
+                <option value="zup" selected>Z-Up</option>
+                <option value="yup">Y-Up</option>
+            </select>
+            <button id="filter-apply-btn">Apply</button>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading-overlay">
+        <div>
+            <div style="text-align:center; margin-bottom: 12px;">Loading 3DGS scene...</div>
+            <div id="loading-progress" style="color: #4af;"></div>
+        </div>
+    </div>
+
+    <!-- Key guide overlay -->
+    <div id="key-guide"></div>
+
+    <!-- Collision flash overlay -->
+    <div id="collision-flash"></div>
+
+    <!-- Placement mode overlay -->
+    <div id="placement-overlay">
+        <div id="placement-mode-label">PLACEMENT MODE</div>
+        <div id="spawn-coords"></div>
+        <div id="placement-instructions">
+            <kbd>WASD</kbd> move drone &nbsp;|&nbsp; <kbd>Q/E</kbd> height &nbsp;|&nbsp; <b>Left-drag</b> orbit &nbsp;|&nbsp; <b>Scroll</b> zoom<br>
+            <kbd>Enter</kbd> confirm &amp; fly &nbsp;|&nbsp; <kbd>Esc</kbd> cancel
+        </div>
+    </div>
+
+    <!-- HUD overlay -->
+    <div id="hud" class="hidden">
+        <div id="hud-top-left">
+            <div class="hud-label">ALT (m)</div>
+            <div class="hud-value" id="hud-altitude">0.0</div>
+            <div class="hud-label" style="margin-top:8px;">V/S (m/s)</div>
+            <div class="hud-value" id="hud-vspeed">0.0</div>
+        </div>
+        <div id="hud-top-right">
+            <div class="hud-label">GND SPD (m/s)</div>
+            <div class="hud-value" id="hud-gspeed">0.0</div>
+            <div class="hud-label" style="margin-top:8px;">FPS</div>
+            <div class="hud-value" id="hud-fps">0</div>
+        </div>
+        <div id="hud-bottom-center">
+            <div id="hud-collision-warn" class="hud-warn" style="display:none;">COLLISION</div>
+        </div>
+        <div id="hud-bottom-left">
+            <div class="hud-label">CONTROLLER</div>
+            <div class="hud-value" id="hud-controller">Keyboard</div>
+        </div>
+        <div id="armed-indicator" class="disarmed">DISARMED</div>
+        <canvas id="osd-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
+    </div>
+
+    <!-- Gear button -->
+    <button id="gear-btn" title="Settings (Tab)">&#9881;</button>
+
+    <!-- Settings panel -->
+    <div id="settings-panel">
+        <button id="close-settings-btn">&times;</button>
+        <h2>Controller Settings</h2>
+
+        <h3>Display</h3>
+        <div class="setting-row">
+            <label for="osd-toggle">FPV OSD Overlay</label>
+            <div class="controls">
+                <input type="checkbox" id="osd-toggle" checked>
+            </div>
+        </div>
+
+        <h3>RC Channel Assignment</h3>
+        <div id="channel-assignments"></div>
+
+        <h3>Button Assignment</h3>
+        <div id="button-assignments"></div>
+
+        <h3>Gamepad Status</h3>
+        <div id="gamepad-status" style="color: #888; font-size: 13px;">No gamepad detected</div>
+
+        <h3>Channel Monitor</h3>
+        <div id="gamepad-axes-display" style="font-size: 11px; color: #666; font-family: 'Courier New', monospace; line-height: 1.6;"></div>
+
+        <h3>Coordinate System</h3>
+        <div class="setting-row">
+            <label>Up Axis</label>
+            <div class="controls">
+                <select id="coord-system-select" disabled style="background:#223;color:#888;border:1px solid #334;border-radius:3px;padding:4px 8px;font-size:13px;cursor:not-allowed;">
+                    <option value="zup" selected>Z-Up</option>
+                    <option value="yup">Y-Up</option>
+                </select>
+            </div>
+        </div>
+
+        <h3>Flight Mode</h3>
+        <div class="setting-row">
+            <label>Mode</label>
+            <div class="controls">
+                <select id="flight-mode-select" style="background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:4px 8px;font-size:13px;">
+                    <option value="drone" selected>Drone (Easy)</option>
+                    <option value="fpv">FPV (Manual)</option>
+                </select>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>FPV Cam Angle (°)</label>
+            <div class="controls">
+                <input type="range" id="cam-mount-angle" min="0" max="60" value="30" step="1">
+                <input type="number" id="cam-mount-angle-num" min="0" max="60" step="1" value="30" style="width:50px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+
+        <h3>Controller Gains</h3>
+        <div class="setting-row">
+            <label>Pos Kp</label>
+            <div class="controls">
+                <input type="range" id="ctrl-pos-kp" min="0" max="10" value="2.0" step="0.1">
+                <span class="deadzone-val" id="ctrl-pos-kp-val">2.0</span>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Pos Ki</label>
+            <div class="controls">
+                <input type="range" id="ctrl-pos-ki" min="0" max="5" value="0.3" step="0.05">
+                <span class="deadzone-val" id="ctrl-pos-ki-val">0.30</span>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Vel Kp</label>
+            <div class="controls">
+                <input type="range" id="ctrl-vel-kp" min="0" max="10" value="3.0" step="0.1">
+                <span class="deadzone-val" id="ctrl-vel-kp-val">3.0</span>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Vel Ki</label>
+            <div class="controls">
+                <input type="range" id="ctrl-vel-ki" min="0" max="5" value="1.0" step="0.05">
+                <span class="deadzone-val" id="ctrl-vel-ki-val">1.00</span>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Alt Kp</label>
+            <div class="controls">
+                <input type="range" id="ctrl-alt-kp" min="0" max="10" value="4.0" step="0.1">
+                <span class="deadzone-val" id="ctrl-alt-kp-val">4.0</span>
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Alt Ki</label>
+            <div class="controls">
+                <input type="range" id="ctrl-alt-ki" min="0" max="5" value="2.0" step="0.05">
+                <span class="deadzone-val" id="ctrl-alt-ki-val">2.00</span>
+            </div>
+        </div>
+
+        <h3>Physics</h3>
+        <div class="setting-row">
+            <label>Mass (g)</label>
+            <div class="controls">
+                <input type="range" id="phys-mass" min="50" max="5000" value="500" step="10">
+                <input type="number" id="phys-mass-num" min="50" max="5000" step="10" value="500" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Max Thrust (gf)</label>
+            <div class="controls">
+                <input type="range" id="phys-thrust" min="100" max="5000" value="1000" step="10">
+                <input type="number" id="phys-thrust-num" min="100" max="5000" step="10" value="1000" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Drag Cd</label>
+            <div class="controls">
+                <input type="range" id="phys-drag-cd" min="0.1" max="3.0" value="1.0" step="0.05">
+                <input type="number" id="phys-drag-cd-num" min="0.1" max="3.0" step="0.05" value="1.0" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Frontal Area (m²)</label>
+            <div class="controls">
+                <input type="range" id="phys-drag-area" min="0.001" max="0.1" value="0.01" step="0.001">
+                <input type="number" id="phys-drag-area-num" min="0.001" max="0.1" step="0.001" value="0.01" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Drone Size (m)</label>
+            <div class="controls">
+                <input type="range" id="phys-drone-size" min="0.1" max="1.0" value="0.3" step="0.05">
+                <input type="number" id="phys-drone-size-num" min="0.1" max="1.0" step="0.05" value="0.3" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+        <div class="setting-row">
+            <label>Collision Radius (m)</label>
+            <div class="controls">
+                <input type="range" id="phys-collision-radius" min="0.05" max="2.0" value="0.3" step="0.05">
+                <input type="number" id="phys-collision-radius-num" min="0.05" max="2.0" step="0.05" value="0.3" style="width:60px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:12px;">
+            </div>
+        </div>
+
+
+        <div style="margin-top: 16px; display: flex; gap: 8px;">
+            <button class="assign-btn" id="export-config-btn">Export Config</button>
+            <button class="assign-btn" id="import-config-btn">Import Config</button>
+            <input type="file" id="import-config-input" accept=".json" style="display:none;">
+        </div>
+    </div>
+
+    <script type="module" src="src/main.js"></script>
+</body>
+</html>
