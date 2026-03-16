@@ -195,27 +195,30 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 ## Project Structure
 
 ```
-├── index.html          # UI layout and styles
-├── serve.py            # Simple HTTP dev server
+├── index.html              # UI layout and styles
+├── serve.py                # Simple HTTP dev server
 ├── src/
-│   ├── main.js         # App init, scene loading, game loop
-│   ├── controller.js   # Keyboard + gamepad input, settings UI
-│   ├── drone.js        # Quaternion physics, FPV/drone control laws
-│   ├── collision.js    # Octree spatial index + collision response
-│   ├── hud.js          # Head-up display overlay
-│   ├── osd.js          # On-screen display (artificial horizon, telemetry)
-│   ├── ply-parser.js   # PLY format parser
-│   ├── splat-parser.js # SPLAT format parser + PLY converter
-│   └── sog-parser.js   # SOG format parser
-├── LICENSE             # Apache 2.0
-└── NOTICE              # Third-party attributions
+│   ├── main.js             # App init, scene loading, game loop
+│   ├── controller.js       # Keyboard + gamepad input, settings UI
+│   ├── drone.js            # Quaternion physics, FPV/drone control laws
+│   ├── collision.js        # Octree spatial index + collision response
+│   ├── hud.js              # Head-up display overlay
+│   ├── osd.js              # On-screen display (artificial horizon, telemetry)
+│   ├── ply-parser.js       # PLY format parser
+│   ├── splat-parser.js     # SPLAT format parser + PLY converter
+│   └── sog-parser.js       # SOG format parser
+├── asset/
+│   ├── mt_mcwf_logo.jpg    # Project logo
+│   └── demo_teaser.jpg     # Downsampled teaser for README
+├── LICENSE                 # Apache 2.0
+└── NOTICE                  # Third-party attributions
 ```
 
 ## Dependencies
 
 | Library | Version | License | Usage |
 |---------|---------|---------|-------|
-| [PlayCanvas](https://github.com/playcanvas/engine) | 2.16.2 | MIT | 3D engine, GSplat rendering |
+| [PlayCanvas](https://github.com/playcanvas/engine) | 2.17.0 | MIT | 3D engine, GSplat rendering |
 | [JSZip](https://github.com/Stuk/jszip) | 3.10.1 | MIT | SOG file decompression |
 
 Both loaded via CDN — no build step or `npm install` required.
