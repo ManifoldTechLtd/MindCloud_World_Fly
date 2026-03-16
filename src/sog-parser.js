@@ -56,7 +56,7 @@ function lerp(a, b, t) {
  * Parse a .sog file for gaussian center positions.
  * Returns { positions: Float32Array, vertexCount, bounds }.
  */
-export async function parseSogForPositions(arrayBuffer) {
+export async function parseSogForPositions(arrayBuffer, options = {}) {
     if (typeof JSZip === 'undefined') {
         throw new Error('JSZip is required to parse .sog files');
     }
@@ -96,6 +96,7 @@ export async function parseSogForPositions(arrayBuffer) {
     ]);
 
     // Reconstruct positions
+    const zUp = options.zUp || false;
     const positions = new Float32Array(vertexCount * 3);
 
     for (let i = 0; i < vertexCount; i++) {
@@ -112,11 +113,21 @@ export async function parseSogForPositions(arrayBuffer) {
         const nz = lerp(mins[2], maxs[2], qz / 65535);
 
         // Undo symmetric log transform
-        // SOG coordinate system: right-handed Y-up (x: right, y: up, z: back)
-        // This matches our world frame, so pass through directly
-        positions[i * 3]     = unlog(nx);
-        positions[i * 3 + 1] = unlog(ny);
-        positions[i * 3 + 2] = unlog(nz);
+        const rawX = unlog(nx);
+        const rawY = unlog(ny);
+        const rawZ = unlog(nz);
+
+        if (zUp) {
+            // Z-up to Y-up: x' = x, y' = z, z' = -y
+            positions[i * 3]     = rawX;
+            positions[i * 3 + 1] = rawZ;
+            positions[i * 3 + 2] = -rawY;
+        } else {
+            // Y-up — pass through directly
+            positions[i * 3]     = rawX;
+            positions[i * 3 + 1] = rawY;
+            positions[i * 3 + 2] = rawZ;
+        }
     }
 
     // Compute bounding box

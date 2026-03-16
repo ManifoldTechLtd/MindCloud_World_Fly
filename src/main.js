@@ -482,7 +482,7 @@ async function loadSceneFile(file) {
         }
 
         // ---- Initial parse with default coord system (for first filter display) ----
-        const defaultCoord = (ext === 'sog') ? 'yup' : coordSystem;
+        const defaultCoord = coordSystem;
         const initialParse = await parseForCoord(ext, arrayBuffer, defaultCoord);
 
         if (ext === 'sog') {
@@ -611,7 +611,7 @@ async function loadSceneFile(file) {
 async function parseForCoord(ext, arrayBuffer, coord) {
     const isZup = coord === 'zup';
     if (ext === 'sog') {
-        return await parseSogForPositions(arrayBuffer);
+        return await parseSogForPositions(arrayBuffer, { zUp: isZup });
     } else if (ext === 'splat') {
         return parseSplatForPositions(arrayBuffer, { zUp: isZup });
     } else {
@@ -623,8 +623,8 @@ async function parseForCoord(ext, arrayBuffer, coord) {
  * Get entity rotation for a given format and coordinate system.
  */
 function getEntityRotation(ext, coord) {
-    if (ext === 'sog') return [0, 0, 0]; // SOG always Y-up
     const isZup = coord === 'zup';
+    if (ext === 'sog') return isZup ? [-90, 0, 0] : [0, 0, 0];
     return isZup ? [-90, 0, 0] : [180, 0, 0];
 }
 
@@ -632,14 +632,16 @@ async function loadGSplat(arrayBuffer, filename, entityRotation) {
     return new Promise((resolve, reject) => {
         // Create a blob URL from the array buffer
         const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
+        const blobUrl = URL.createObjectURL(blob);
+        // Append filename as hash so PlayCanvas can detect format from extension
+        const url = blobUrl + '#/' + filename;
 
         // Remove existing gsplat entity if any
         const existing = app.root.findByName('gsplat-scene');
         if (existing) existing.destroy();
 
         // Create asset
-        const asset = new pc.Asset(filename, 'gsplat', { url: url });
+        const asset = new pc.Asset(filename, 'gsplat', { url: url, filename: filename });
 
         asset.on('load', () => {
             const entity = new pc.Entity('gsplat-scene');
@@ -650,12 +652,12 @@ async function loadGSplat(arrayBuffer, filename, entityRotation) {
             const rot = entityRotation || [0, 0, 0];
             entity.setEulerAngles(rot[0], rot[1], rot[2]);
             app.root.addChild(entity);
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(blobUrl);
             resolve();
         });
 
         asset.on('error', (err) => {
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(blobUrl);
             reject(new Error(`Failed to load GSplat: ${err}`));
         });
 
@@ -753,24 +755,17 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
         let curAnalysis = analysis;
         let curCoord = defaultCoord;
 
-        // Configure coord selector
-        if (ext === 'sog') {
-            // SOG is always Y-up — hide selector
-            coordSelect.style.display = 'none';
-            if (coordLabel) coordLabel.style.display = 'none';
-            coordSelect.value = 'yup';
-        } else {
-            coordSelect.style.display = '';
-            if (coordLabel) coordLabel.style.display = '';
-            coordSelect.value = defaultCoord;
-        }
+        // Configure coord selector (shown for all formats including SOG)
+        coordSelect.style.display = '';
+        if (coordLabel) coordLabel.style.display = '';
+        coordSelect.value = defaultCoord;
 
         let maxExtent = Math.ceil(curAnalysis.maxDistance);
 
         // Configure distance slider + input
         distSlider.max = maxExtent;
         distInput.max = maxExtent;
-        const defaultDist = Math.min(500, maxExtent);
+        const defaultDist = maxExtent;
         distSlider.value = defaultDist;
         distInput.value = defaultDist;
 

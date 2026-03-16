@@ -1,6 +1,14 @@
 # MindCloud World Fly
 
-A browser-based drone flight simulator for 3D Gaussian Splatting scenes. Fly through any 3DGS scene with realistic physics, FPV or stabilized drone controls, and RC transmitter support — all rendered in real time via the PlayCanvas engine.
+<p align="center">
+  <img src="asset/mt_mcwf_logo.jpg" alt="MindCloud World Fly Logo" height="80">
+</p>
+
+<p align="center">
+  <img src="asset/demo_teaser.jpg" alt="MindCloud World Fly — FPV drone flight in a 3DGS scene" width="100%">
+</p>
+
+A browser-based drone flight simulator for 3D Gaussian Splatting scenes. Fly through any 3DGS scene with realistic physics, FPV or stabilized drone controls, and RC transmitter support.
 
 ## About Manifold Tech
 
@@ -25,6 +33,10 @@ Open **http://localhost:8080** in your browser (Chrome/Edge recommended for Game
 | SOG    | `.sog`    | Compressed archive format (always Y-up) |
 
 Drag and drop a file onto the page, or click **Choose File** to browse.
+
+## Demo Scene
+
+A ready-to-fly demo scene is available on Google Drive: [**field_z-up.sog**](https://drive.google.com/file/d/11yztizITalnHwnichd4iXHVaQbMYplTD/view?usp=sharing). This scene was captured using Manifold Tech hardware and showcases a real-world outdoor environment reconstructed as a 3D Gaussian Splatting model. Note that this scene uses the **Z-up** coordinate system — select **Z-up** in the coordinate system dropdown during the filter step. Download the file, then drag and drop it onto the page to start flying immediately.
 
 ## User Guide
 
