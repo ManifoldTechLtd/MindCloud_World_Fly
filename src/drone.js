@@ -564,12 +564,5 @@ export class Drone {
             }
         }
 
-        // Ground plane
-        if (this.y < 0.1) {
-            this.y = 0.1;
-            if (this.vy < 0) this.vy = -this.vy * 0.2;
-            this.isColliding = true;
-            this.collisionIntensity = Math.max(this.collisionIntensity, 0.3);
-        }
     }
 }

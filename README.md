@@ -179,7 +179,6 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 - Drone is pushed out along the estimated surface normal
 - Velocity is reflected and dampened
 - Screen flashes red + HUD shows collision warning
-- Ground plane at Y=0.1 acts as a floor
 
 ## Project Structure
 
