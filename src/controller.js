@@ -26,6 +26,7 @@ const BUTTON_ACTIONS = ['arm', 'reset'];
 // All persisted slider/select IDs
 const SETTINGS_IDS = [
     'flight-mode-select',
+    'cam-hfov',
     'cam-mount-angle',
     'ctrl-pos-kp', 'ctrl-pos-ki', 'ctrl-vel-kp', 'ctrl-vel-ki', 'ctrl-alt-kp', 'ctrl-alt-ki',
     'phys-mass', 'phys-thrust', 'phys-drag-cd', 'phys-drag-area',
@@ -764,6 +765,7 @@ export class Controller {
         this._bindSliderNum('phys-drag-area', 'phys-drag-area-num');
         this._bindSliderNum('phys-drone-size', 'phys-drone-size-num');
         this._bindSliderNum('phys-collision-radius', 'phys-collision-radius-num');
+        this._bindSliderNum('cam-hfov', 'cam-hfov-num');
         this._bindSliderNum('cam-mount-angle', 'cam-mount-angle-num');
 
         // Controller gain sliders

@@ -5,6 +5,10 @@
 </p>
 
 <p align="center">
+  <img src="asset/demo_flight.gif" alt="MindCloud World Fly — Flight demo" width="100%">
+</p>
+
+<p align="center">
   <img src="asset/demo_teaser2.jpg" alt="MindCloud World Fly — Drone mode flight in a 3DGS scene" width="100%">
 </p>
 
@@ -213,6 +217,7 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   └── sog-parser.js       # SOG format parser
 ├── asset/
 │   ├── mt_mcwf_logo.jpg    # Project logo
+│   ├── demo_flight.gif     # Flight demo animation
 │   ├── demo_teaser.jpg     # Teaser image 1
 │   └── demo_teaser2.jpg    # Teaser image 2
 ├── LICENSE                 # Apache 2.0

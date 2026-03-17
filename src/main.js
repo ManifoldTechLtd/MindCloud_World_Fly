@@ -109,6 +109,9 @@ function initPlayCanvas() {
 
     app.start();
 
+    // Apply initial HFOV
+    updateCameraFov();
+
     // Game loop
     app.on('update', (dt) => gameLoop(dt));
 
@@ -862,9 +865,23 @@ function showFilterUI(gsplatEntity, positions, opacities, vertexCount, analysis,
     });
 }
 
+// ---- Camera FOV ----
+function updateCameraFov() {
+    if (!cameraEntity) return;
+    const hfovEl = document.getElementById('cam-hfov');
+    const hfov = hfovEl ? parseFloat(hfovEl.value) : 120;
+    const aspect = app.graphicsDevice.width / app.graphicsDevice.height;
+    const hfovRad = hfov * Math.PI / 180;
+    const vfov = 2 * Math.atan(Math.tan(hfovRad / 2) / aspect) * 180 / Math.PI;
+    cameraEntity.camera.fov = vfov;
+}
+
 // ---- Game Loop ----
 function gameLoop(dt) {
     if (!sceneLoaded) return;
+
+    // Update camera FOV from settings (applies in all modes)
+    updateCameraFov();
 
     if (mode === 'placement' || mode === 'filtering') {
         updateOrbitCamera(dt);
