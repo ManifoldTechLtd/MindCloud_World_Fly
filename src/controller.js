@@ -33,11 +33,11 @@ const SETTINGS_IDS = [
 ];
 
 const DEFAULT_MAPPING = {
-    roll:       { axisIndex: 0, inverted: false, deadzone: 0.05 },
-    pitch:      { axisIndex: 1, inverted: false, deadzone: 0.05 },
-    throttle:   { axisIndex: 2, inverted: false, deadzone: 0.05 },
-    yaw:        { axisIndex: 3, inverted: false, deadzone: 0.05 },
-    cameraTilt: { axisIndex: -1, inverted: false, deadzone: 0.05 },
+    roll:       { axisIndex: 0, inverted: false, deadzone: 0 },
+    pitch:      { axisIndex: 1, inverted: false, deadzone: 0 },
+    throttle:   { axisIndex: 2, inverted: false, deadzone: 0 },
+    yaw:        { axisIndex: 3, inverted: false, deadzone: 0 },
+    cameraTilt: { axisIndex: -1, inverted: false, deadzone: 0 },
 };
 
 const DEFAULT_BUTTON_MAPPING = {

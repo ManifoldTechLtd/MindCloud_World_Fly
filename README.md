@@ -5,6 +5,10 @@
 </p>
 
 <p align="center">
+  <img src="asset/demo_teaser2.jpg" alt="MindCloud World Fly — Drone mode flight in a 3DGS scene" width="100%">
+</p>
+
+<p align="center">
   <img src="asset/demo_teaser.jpg" alt="MindCloud World Fly — FPV drone flight in a 3DGS scene" width="100%">
 </p>
 
@@ -146,7 +150,7 @@ The FPV OSD overlay can be toggled on/off in settings (Display → FPV OSD Overl
 Press **Tab** to open. Sections:
 
 - **Display** — toggle FPV OSD overlay
-- **RC Channel Assignment** — assign and invert axes, set dead zones, with listen-mode auto-detect
+- **RC Channel Assignment** — assign and invert axes, set dead zones (default 0), with listen-mode auto-detect
 - **Button Assignment** — assign arm/reset to buttons or axis thresholds
 - **Gamepad Status** — shows connected controller name
 - **Channel Monitor** — real-time axis values from the gamepad
@@ -165,7 +169,7 @@ All settings persist automatically in `localStorage`.
 2. Click **Assign** next to any axis or button action
 3. Move the stick or press the button on your transmitter
 4. Use **Invert** checkbox if axis direction is reversed
-5. Adjust **Dead Zone** sliders as needed
+5. Adjust **Dead Zone** sliders as needed (default is 0)
 
 You can also **Export** / **Import** full configs as JSON files to share between browsers or back up your setup.
 
@@ -209,7 +213,8 @@ Gaussian center positions are filtered by distance and opacity, then built into 
 │   └── sog-parser.js       # SOG format parser
 ├── asset/
 │   ├── mt_mcwf_logo.jpg    # Project logo
-│   └── demo_teaser.jpg     # Downsampled teaser for README
+│   ├── demo_teaser.jpg     # Teaser image 1
+│   └── demo_teaser2.jpg    # Teaser image 2
 ├── LICENSE                 # Apache 2.0
 └── NOTICE                  # Third-party attributions
 ```
