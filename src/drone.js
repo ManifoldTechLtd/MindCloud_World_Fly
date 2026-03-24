@@ -96,6 +96,10 @@ export class Drone {
         this._targetX = 0; this._targetY = 2; this._targetZ = 0;
         this._targetYaw = 0;
 
+        // Smoothed attitude targets (prevent limit-cycle at angle clamp)
+        this._smoothTargetPitch = 0;
+        this._smoothTargetRoll  = 0;
+
         // Integral accumulators (position loop)
         this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
         // Integral accumulators (velocity loop)
@@ -146,6 +150,8 @@ export class Drone {
         this._targetYaw = 0;
         this._posIntX = 0; this._posIntY = 0; this._posIntZ = 0;
         this._velIntX = 0; this._velIntY = 0; this._velIntZ = 0;
+        this._smoothTargetPitch = 0;
+        this._smoothTargetRoll  = 0;
     }
 
     readSettings() {
@@ -463,9 +469,16 @@ export class Drone {
         vDesY = clamp(vDesY, -this.droneMaxVSpeed * boost, this.droneMaxVSpeed * boost);
 
         // ---- 3. Inner loop: Velocity PI → desired tilt angles ----
-        const velErrX = vDesX - this.vx;
+        const maxAngle = this.droneMaxAngle;
+        let velErrX = vDesX - this.vx;
         const velErrY = vDesY - this.vy;
-        const velErrZ = vDesZ - this.vz;
+        let velErrZ = vDesZ - this.vz;
+
+        // Clamp velocity error so acceleration demand stays within angle limit
+        const aMaxHoriz = G * Math.tan(maxAngle * DEG2RAD);
+        const velErrClamp = aMaxHoriz / this.droneVelKp;
+        velErrX = clamp(velErrX, -velErrClamp, velErrClamp);
+        velErrZ = clamp(velErrZ, -velErrClamp, velErrClamp);
 
         // Accumulate velocity integral (with anti-windup)
         const viMax = this._velIntMax;
@@ -482,15 +495,19 @@ export class Drone {
         const aFwd   = aDesX * fwdX + aDesZ * fwdZ;
         const aRight = aDesX * rightX + aDesZ * rightZ;
 
-        const maxAngle = this.droneMaxAngle;
         // Forward accel → negative pitch (nose down), right accel → positive roll
         const targetPitch = clamp(-aFwd / G * RAD2DEG, -maxAngle, maxAngle);
         const targetRoll  = clamp(-aRight / G * RAD2DEG, -maxAngle, maxAngle);
 
+        // Smooth target angles to prevent residual oscillation at saturation boundary
+        const smoothFactor = 1 - Math.exp(-10 * dt);
+        this._smoothTargetPitch += (targetPitch - this._smoothTargetPitch) * smoothFactor;
+        this._smoothTargetRoll  += (targetRoll  - this._smoothTargetRoll)  * smoothFactor;
+
         // ---- 4. Attitude P-controller: tilt error → body rotation ----
         const dec = this._decomposeOrientation();
-        const pitchErr = targetPitch - dec.bodyPitchDeg;
-        const rollErr  = targetRoll  - dec.bodyRollDeg;
+        const pitchErr = this._smoothTargetPitch - dec.bodyPitchDeg;
+        const rollErr  = this._smoothTargetRoll  - dec.bodyRollDeg;
 
         const maxStep = this.droneAngleRate * dt;
         const dpitch = clamp(pitchErr, -maxStep, maxStep);
