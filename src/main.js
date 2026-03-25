@@ -929,14 +929,37 @@ function gameLoop(dt) {
     cameraEntity.setPosition(transform.position.x, transform.position.y, transform.position.z);
     cameraEntity.setEulerAngles(transform.rotation.x, transform.rotation.y, transform.rotation.z);
 
-    // Update HUD, OSD, and key guide
-    hud.update(drone, controller);
+    // Clean mode: hide all overlays
+    const cleanToggle = document.getElementById('clean-mode-toggle');
+    const cleanMode = cleanToggle ? cleanToggle.checked : false;
+
+    // HUD
+    const hudEl = document.getElementById('hud');
+    if (cleanMode) {
+        hudEl?.classList.add('hidden');
+    } else {
+        hudEl?.classList.remove('hidden');
+        hud.update(drone, controller);
+    }
+
+    // OSD
     if (osd) {
         const osdToggle = document.getElementById('osd-toggle');
-        osd.setEnabled(osdToggle ? osdToggle.checked : true);
+        osd.setEnabled(!cleanMode && (osdToggle ? osdToggle.checked : true));
         osd.update(drone, controller);
     }
-    updateKeyGuide();
+
+    // Logo, key guide, gear button
+    const logo = document.getElementById('game-logo');
+    const gearBtn = document.getElementById('gear-btn');
+    const keyGuide = document.getElementById('key-guide');
+    if (cleanMode) {
+        logo?.classList.remove('visible');
+        keyGuide?.classList.remove('visible');
+    } else {
+        if (mode === 'flight') logo?.classList.add('visible');
+        updateKeyGuide();
+    }
 }
 
 // ---- Key Guide ----

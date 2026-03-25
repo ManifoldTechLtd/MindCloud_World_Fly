@@ -79,6 +79,7 @@
             pointer-events: none; z-index: 10; color: #0f0;
             font-family: 'Courier New', monospace; font-size: 14px;
         }
+        #hud.hidden { display: none; }
         #hud-top-left { position: absolute; top: 16px; left: 16px; }
         #hud-top-right { position: absolute; top: 16px; right: 16px; text-align: right; }
         #hud-bottom-center { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); text-align: center; }
@@ -333,6 +334,12 @@
         <h2>Controller Settings</h2>
 
         <h3>Display</h3>
+        <div class="setting-row">
+            <label for="clean-mode-toggle">Clean Mode (hide all overlays)</label>
+            <div class="controls">
+                <input type="checkbox" id="clean-mode-toggle">
+            </div>
+        </div>
         <div class="setting-row">
             <label for="osd-toggle">FPV OSD Overlay</label>
             <div class="controls">
