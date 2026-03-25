@@ -34,11 +34,11 @@ const SETTINGS_IDS = [
 ];
 
 const DEFAULT_MAPPING = {
-    roll:       { axisIndex: 0, inverted: false, deadzone: 0 },
-    pitch:      { axisIndex: 1, inverted: false, deadzone: 0 },
-    throttle:   { axisIndex: 2, inverted: false, deadzone: 0 },
-    yaw:        { axisIndex: 3, inverted: false, deadzone: 0 },
-    cameraTilt: { axisIndex: -1, inverted: false, deadzone: 0 },
+    roll:       { axisIndex: 0, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
+    pitch:      { axisIndex: 1, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
+    throttle:   { axisIndex: 2, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
+    yaw:        { axisIndex: 3, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
+    cameraTilt: { axisIndex: -1, inverted: false, deadzone: 0, rate: 1.0, expo: 0.0 },
 };
 
 const DEFAULT_BUTTON_MAPPING = {
@@ -147,6 +147,11 @@ export class Controller {
                     let val = gp.axes[m.axisIndex];
                     if (m.inverted) val = -val;
                     if (Math.abs(val) < m.deadzone) val = 0;
+                    // Apply expo curve: output = val * (1 - expo + expo * val²)
+                    const e = m.expo || 0;
+                    if (e > 0) {
+                        val = Math.sign(val) * Math.abs(val) * (1 - e + e * val * val);
+                    }
                     this.axes[action] += val;
                     if (action === 'cameraTilt') {
                         this._cameraTiltAxis = val;
@@ -255,6 +260,11 @@ export class Controller {
             boost: this.boost,
             armed: this.armed,
             resetTriggered: resetRising,
+            rates: {
+                roll:  this.mapping.roll.rate  !== undefined ? this.mapping.roll.rate  : 1.0,
+                pitch: this.mapping.pitch.rate !== undefined ? this.mapping.pitch.rate : 1.0,
+                yaw:   this.mapping.yaw.rate   !== undefined ? this.mapping.yaw.rate   : 1.0,
+            },
         };
     }
 
@@ -505,6 +515,9 @@ export class Controller {
             container.appendChild(row);
         }
 
+        // Rates & Expo section
+        this._buildRatesExpoUI();
+
         // Button assignments (support button or axis source)
         const btnContainer = document.getElementById('button-assignments');
         if (btnContainer) {
@@ -664,6 +677,195 @@ export class Controller {
 
         // Settings panel buttons
         this._setupSettingsButtons();
+    }
+
+    _buildRatesExpoUI() {
+        const container = document.getElementById('rates-expo');
+        if (!container) return;
+        container.innerHTML = '';
+
+        const RATE_EXPO_AXES = ['roll', 'pitch', 'throttle', 'yaw'];
+        const RATE_AXES = ['roll', 'pitch', 'yaw']; // throttle has no rate
+        const AXIS_COLORS = {
+            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+        };
+
+        for (const action of RATE_EXPO_AXES) {
+            const m = this.mapping[action];
+            // Ensure rate/expo exist (migration from old config)
+            if (m.rate === undefined) m.rate = 1.0;
+            if (m.expo === undefined) m.expo = 0.0;
+
+            const row = document.createElement('div');
+            row.className = 'setting-row';
+            row.style.flexWrap = 'wrap';
+
+            const label = document.createElement('label');
+            label.style.minWidth = '80px';
+            const dot = document.createElement('span');
+            dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${AXIS_COLORS[action]};margin-right:6px;`;
+            label.appendChild(dot);
+            label.appendChild(document.createTextNode(action.charAt(0).toUpperCase() + action.slice(1)));
+            row.appendChild(label);
+
+            const controls = document.createElement('div');
+            controls.className = 'controls';
+
+            // Rate slider + number input (only for roll/pitch/yaw)
+            if (RATE_AXES.includes(action)) {
+                const rateLabel = document.createElement('span');
+                rateLabel.style.cssText = 'font-size:11px;color:#888;';
+                rateLabel.textContent = 'Rate';
+                controls.appendChild(rateLabel);
+                const rateSlider = document.createElement('input');
+                rateSlider.type = 'range';
+                rateSlider.min = '0'; rateSlider.max = '10'; rateSlider.step = '0.1';
+                rateSlider.value = m.rate;
+                rateSlider.style.width = '70px';
+                const rateNum = document.createElement('input');
+                rateNum.type = 'number';
+                rateNum.min = '0'; rateNum.max = '10'; rateNum.step = '0.1';
+                rateNum.value = m.rate;
+                rateNum.style.cssText = 'width:48px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:11px;';
+                rateSlider.addEventListener('input', () => {
+                    const v = parseFloat(rateSlider.value);
+                    this.mapping[action].rate = v;
+                    rateNum.value = v;
+                    this._saveConfig();
+                });
+                rateNum.addEventListener('change', () => {
+                    const v = Math.max(0, Math.min(10, parseFloat(rateNum.value) || 0));
+                    this.mapping[action].rate = v;
+                    rateSlider.value = v;
+                    rateNum.value = v;
+                    this._saveConfig();
+                });
+                controls.appendChild(rateSlider);
+                controls.appendChild(rateNum);
+            }
+
+            // Expo slider + number input
+            const expoLabel = document.createElement('span');
+            expoLabel.style.cssText = `font-size:11px;color:#888;${RATE_AXES.includes(action) ? 'margin-left:8px;' : ''}`;
+            expoLabel.textContent = 'Expo';
+            controls.appendChild(expoLabel);
+            const expoSlider = document.createElement('input');
+            expoSlider.type = 'range';
+            expoSlider.min = '0'; expoSlider.max = '1.0'; expoSlider.step = '0.05';
+            expoSlider.value = m.expo;
+            expoSlider.style.width = '70px';
+            const expoNum = document.createElement('input');
+            expoNum.type = 'number';
+            expoNum.min = '0'; expoNum.max = '1'; expoNum.step = '0.05';
+            expoNum.value = m.expo;
+            expoNum.style.cssText = 'width:48px;background:#223;color:#ddd;border:1px solid #446;border-radius:3px;padding:2px 4px;font-size:11px;';
+            expoSlider.addEventListener('input', () => {
+                const v = parseFloat(expoSlider.value);
+                this.mapping[action].expo = v;
+                expoNum.value = v;
+                this._saveConfig();
+                this._drawExpoCurve(action);
+            });
+            expoNum.addEventListener('change', () => {
+                const v = Math.max(0, Math.min(1, parseFloat(expoNum.value) || 0));
+                this.mapping[action].expo = v;
+                expoSlider.value = v;
+                expoNum.value = v;
+                this._saveConfig();
+                this._drawExpoCurve(action);
+            });
+            controls.appendChild(expoSlider);
+            controls.appendChild(expoNum);
+
+            row.appendChild(controls);
+            container.appendChild(row);
+        }
+
+        // Create 4 canvases in the grid container
+        const gridContainer = document.getElementById('expo-curves-container');
+        if (gridContainer) {
+            gridContainer.innerHTML = '';
+            for (const action of RATE_EXPO_AXES) {
+                const canvas = document.createElement('canvas');
+                canvas.id = `expo-curve-${action}`;
+                canvas.width = 220;
+                canvas.height = 220;
+                canvas.style.cssText = 'width:100%;background:#112;border:1px solid #334;border-radius:6px;';
+                gridContainer.appendChild(canvas);
+                this._drawExpoCurve(action);
+            }
+        }
+    }
+
+    _drawExpoCurve(action) {
+        const AXIS_COLORS = {
+            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+        };
+        const canvas = document.getElementById(`expo-curve-${action}`);
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width;
+        const H = canvas.height;
+        const pad = 24;
+        const plotW = W - pad * 2;
+        const plotH = H - pad * 2;
+
+        ctx.clearRect(0, 0, W, H);
+
+        // Title
+        ctx.fillStyle = AXIS_COLORS[action] || '#4af';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(action.charAt(0).toUpperCase() + action.slice(1), W / 2, 14);
+
+        // Grid
+        ctx.strokeStyle = '#334';
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i <= 4; i++) {
+            const x = pad + (plotW * i / 4);
+            const y = pad + (plotH * i / 4);
+            ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, pad + plotH); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(pad + plotW, y); ctx.stroke();
+        }
+
+        // Tick labels (-1, 0, 1)
+        ctx.fillStyle = '#555';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('-1', pad, pad + plotH + 12);
+        ctx.fillText('0', pad + plotW / 2, pad + plotH + 12);
+        ctx.fillText('1', pad + plotW, pad + plotH + 12);
+        ctx.textAlign = 'right';
+        ctx.fillText('-1', pad - 4, pad + plotH + 3);
+        ctx.fillText('0', pad - 4, pad + plotH / 2 + 3);
+        ctx.fillText('1', pad - 4, pad + 3);
+
+        // Linear reference line (dashed)
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(pad, pad + plotH);
+        ctx.lineTo(pad + plotW, pad);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Expo curve (pure expo, no rate scaling)
+        const m = this.mapping[action];
+        const expo = m.expo || 0;
+
+        ctx.strokeStyle = AXIS_COLORS[action] || '#4af';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let px = 0; px <= plotW; px++) {
+            const input = (px / plotW) * 2 - 1; // -1..1
+            const absIn = Math.abs(input);
+            const output = Math.sign(input) * absIn * (1 - expo + expo * absIn * absIn);
+            const x = pad + px;
+            const y = pad + plotH / 2 - output * (plotH / 2);
+            if (px === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
     }
 
     _updateGamepadDisplay(gp) {

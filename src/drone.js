@@ -379,11 +379,12 @@ export class Drone {
 
     _controlFPV(dt, input) {
         const boost = input.boost ? 1.5 : 1.0;
+        const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
 
-        // Sticks → target angular rates (body frame)
-        const tPR = input.pitch * this.maxPitchRate * boost;
-        const tRR = -input.roll * this.maxRollRate * boost;
-        const tYR = input.yaw  * this.maxYawRate  * boost;
+        // Sticks → target angular rates (body frame), scaled by rate
+        const tPR = input.pitch * this.maxPitchRate * rates.pitch * boost;
+        const tRR = -input.roll * this.maxRollRate * rates.roll * boost;
+        const tYR = input.yaw  * this.maxYawRate  * rates.yaw  * boost;
 
         // Smooth rate tracking
         const s = 1 - Math.exp(-15 * dt);
@@ -418,9 +419,12 @@ export class Drone {
         _mat4.getX(_v3);
         const rightX = _v3.x, rightZ = _v3.z;
 
+        // Rate multipliers for roll/pitch/yaw (not throttle)
+        const rates = input.rates || { roll: 1, pitch: 1, yaw: 1 };
+
         // Pitch stick → forward velocity command, Roll stick → right velocity command
-        const cmdFwd   = -input.pitch * this.droneMaxSpeed * boost; // pitch=-1 (up) → forward
-        const cmdRight = input.roll * this.droneMaxSpeed * boost;   // roll=+1 (right) → right
+        const cmdFwd   = -input.pitch * this.droneMaxSpeed * rates.pitch * boost; // pitch=-1 (up) → forward
+        const cmdRight = input.roll * this.droneMaxSpeed * rates.roll * boost;   // roll=+1 (right) → right
 
         // Convert body-frame velocity command to world-frame and integrate into target position
         const cmdWorldX = cmdFwd * fwdX + cmdRight * rightX;
@@ -428,11 +432,11 @@ export class Drone {
         this._targetX += cmdWorldX * dt;
         this._targetZ += cmdWorldZ * dt;
 
-        // Throttle → target altitude
+        // Throttle → target altitude (no rate scaling)
         this._targetY += input.throttle * this.droneMaxVSpeed * boost * dt;
 
-        // Yaw stick → target yaw
-        this._targetYaw += input.yaw * this.maxYawRate * boost * dt;
+        // Yaw stick → target yaw, scaled by yaw rate
+        this._targetYaw += input.yaw * this.maxYawRate * rates.yaw * boost * dt;
 
         // When sticks active, clear position integrals to prevent windup
         if (Math.abs(input.pitch) > 0.05 || Math.abs(input.roll) > 0.05) {
