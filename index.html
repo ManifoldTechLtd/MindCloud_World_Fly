@@ -30,7 +30,7 @@
 
         /* Logo (flight mode — bottom center) */
         #game-logo {
-            position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+            position: absolute; bottom: 48px; left: 50%; transform: translateX(-50%);
             height: 5vh; z-index: 200; pointer-events: none;
             opacity: 0.9; border: none; border-radius: 4px; padding: 0;
             background: transparent;
@@ -50,10 +50,10 @@
         #drop-zone p { font-size: 1.1em; color: #aaa; margin-bottom: 1.5em; }
         #drop-zone.dragover { background: rgba(30,120,255,0.3); }
         #file-picker-btn {
-            padding: 12px 32px; font-size: 1.1em; border: 2px solid #4af; background: transparent;
-            color: #4af; border-radius: 8px; cursor: pointer; transition: all 0.2s;
+            padding: 12px 32px; font-size: 1.1em; border: 2px solid #4272F5; background: transparent;
+            color: #4272F5; border-radius: 8px; cursor: pointer; transition: all 0.2s;
         }
-        #file-picker-btn:hover { background: #4af; color: #000; }
+        #file-picker-btn:hover { background: #4272F5; color: #000; }
         #file-input { display: none; }
 
         /* Key Guide */
@@ -66,7 +66,7 @@
         }
         #key-guide.visible { display: block; }
         #key-guide .guide-title {
-            color: #4af; font-weight: bold; font-size: 13px; margin-bottom: 4px;
+            color: #4272F5; font-weight: bold; font-size: 13px; margin-bottom: 4px;
         }
         #key-guide kbd {
             background: rgba(255,255,255,0.15); border-radius: 3px;
@@ -107,11 +107,11 @@
         #settings-panel {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
             width: 520px; max-height: 80vh; overflow-y: auto;
-            background: rgba(20,20,30,0.95); border: 1px solid #4af; border-radius: 12px;
+            background: rgba(20,20,30,0.95); border: 1px solid #4272F5; border-radius: 12px;
             padding: 24px; z-index: 200; display: none; pointer-events: auto; color: #ddd;
         }
         #settings-panel.visible { display: block; }
-        #settings-panel h2 { color: #4af; margin-bottom: 16px; font-size: 1.3em; }
+        #settings-panel h2 { color: #4272F5; margin-bottom: 16px; font-size: 1.3em; }
         #settings-panel h3 { color: #8cf; margin: 16px 0 8px; font-size: 1em; }
         .setting-row {
             display: flex; align-items: center; justify-content: space-between;
@@ -120,15 +120,15 @@
         .setting-row label { flex: 1; }
         .setting-row .controls { display: flex; align-items: center; gap: 8px; }
         .assign-btn {
-            padding: 4px 12px; background: #335; border: 1px solid #4af; color: #4af;
+            padding: 4px 12px; background: #335; border: 1px solid #4272F5; color: #4272F5;
             border-radius: 4px; cursor: pointer; font-size: 12px; pointer-events: auto;
         }
-        .assign-btn:hover { background: #4af; color: #000; }
+        .assign-btn:hover { background: #4272F5; color: #000; }
         .assign-btn.listening { background: #f80; border-color: #f80; color: #000; animation: pulse 0.8s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
         .axis-label { color: #8cf; min-width: 60px; text-align: center; font-size: 13px; }
-        input[type="checkbox"] { accent-color: #4af; }
-        input[type="range"] { width: 80px; accent-color: #4af; }
+        input[type="checkbox"] { accent-color: #4272F5; }
+        input[type="range"] { width: 80px; accent-color: #4272F5; }
         .deadzone-val { min-width: 36px; text-align: right; font-size: 12px; color: #aaa; }
         #close-settings-btn {
             position: absolute; top: 12px; right: 16px; background: none; border: none;
@@ -163,13 +163,13 @@
         #filter-overlay > * { pointer-events: auto; }
         #filter-overlay.visible { display: flex; }
         #filter-panel {
-            background: rgba(20,20,30,0.85); border: 1px solid #4af; border-radius: 10px 10px 0 0;
+            background: rgba(20,20,30,0.85); border: 1px solid #4272F5; border-radius: 10px 10px 0 0;
             padding: 12px 24px; width: 80vw;
             display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
         }
-        #filter-panel h2 { color: #4af; font-size: 1em; margin: 0; white-space: nowrap; }
+        #filter-panel h2 { color: #4272F5; font-size: 1em; margin: 0; white-space: nowrap; }
         #filter-panel p { display: none; }
-        #filter-dist-slider, #filter-opacity-slider { flex: 1; min-width: 100px; accent-color: #4af; margin: 0; }
+        #filter-dist-slider, #filter-opacity-slider { flex: 1; min-width: 100px; accent-color: #4272F5; margin: 0; }
         .filter-num-input {
             width: 60px; background: #112; color: #fff; border: 1px solid #446;
             border-radius: 4px; padding: 2px 6px; font-size: 12px; text-align: center;
@@ -177,10 +177,10 @@
         }
         #filter-stats { color: #8cf; font-size: 12px; font-family: 'Courier New', monospace; margin: 0; }
         #filter-apply-btn {
-            padding: 6px 18px; font-size: 0.9em; border: 1px solid #4af; background: transparent;
-            color: #4af; border-radius: 6px; cursor: pointer; transition: all 0.2s; margin: 0;
+            padding: 6px 18px; font-size: 0.9em; border: 1px solid #4272F5; background: transparent;
+            color: #4272F5; border-radius: 6px; cursor: pointer; transition: all 0.2s; margin: 0;
         }
-        #filter-apply-btn:hover { background: #4af; color: #000; }
+        #filter-apply-btn:hover { background: #4272F5; color: #000; }
         #filter-guide {
             position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
             background: rgba(0,0,0,0.5); border-radius: 6px; padding: 6px 16px;
@@ -211,13 +211,13 @@
         }
         #placement-instructions kbd {
             background: #335; padding: 2px 6px; border-radius: 3px;
-            border: 1px solid #557; color: #4af; font-family: monospace;
+            border: 1px solid #557; color: #4272F5; font-family: monospace;
         }
         #placement-mode-label {
             position: absolute; bottom: 140px; left: 50%; transform: translateX(-50%);
-            background: rgba(68,170,255,0.2); color: #4af; padding: 6px 20px;
+            background: rgba(68,170,255,0.2); color: #4272F5; padding: 6px 20px;
             border-radius: 4px; font-size: 16px; font-weight: bold;
-            border: 1px solid #4af;
+            border: 1px solid #4272F5;
         }
         #spawn-marker {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -230,7 +230,7 @@
         #spawn-marker::after { width: 100%; height: 2px; top: 50%; transform: translateY(-50%); }
         #spawn-coords {
             position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%);
-            color: #4af; font-family: 'Courier New', monospace; font-size: 13px;
+            color: #4272F5; font-family: 'Courier New', monospace; font-size: 13px;
             display: none;
         }
     </style>
@@ -279,7 +279,7 @@
         <div style="display:flex;flex-direction:column;align-items:center;">
             <img src="asset/logo.png" alt="MindCloud World Fly" style="height:15vh;margin-bottom:20px;background:transparent;">
             <div style="text-align:center; margin-bottom: 12px;">Loading 3DGS scene...</div>
-            <div id="loading-progress" style="color: #4af;"></div>
+            <div id="loading-progress" style="color: #4272F5;"></div>
         </div>
     </div>
 

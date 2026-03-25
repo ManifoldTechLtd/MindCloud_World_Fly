@@ -672,7 +672,7 @@ export class Controller {
         const statusEl = document.getElementById('gamepad-status');
         if (statusEl) {
             statusEl.textContent = this.connected ? `Connected: ${this.gamepadName}` : 'No gamepad detected';
-            statusEl.style.color = this.connected ? '#4af' : '#888';
+            statusEl.style.color = this.connected ? '#4272F5' : '#888';
         }
 
         // Settings panel buttons
@@ -687,7 +687,7 @@ export class Controller {
         const RATE_EXPO_AXES = ['roll', 'pitch', 'throttle', 'yaw'];
         const RATE_AXES = ['roll', 'pitch', 'yaw']; // throttle has no rate
         const AXIS_COLORS = {
-            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+            roll: '#4272F5', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
         };
 
         for (const action of RATE_EXPO_AXES) {
@@ -799,7 +799,7 @@ export class Controller {
 
     _drawExpoCurve(action) {
         const AXIS_COLORS = {
-            roll: '#4af', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
+            roll: '#4272F5', pitch: '#f44', throttle: '#4f4', yaw: '#fa4'
         };
         const canvas = document.getElementById(`expo-curve-${action}`);
         if (!canvas) return;
@@ -813,7 +813,7 @@ export class Controller {
         ctx.clearRect(0, 0, W, H);
 
         // Title
-        ctx.fillStyle = AXIS_COLORS[action] || '#4af';
+        ctx.fillStyle = AXIS_COLORS[action] || '#4272F5';
         ctx.font = 'bold 11px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(action.charAt(0).toUpperCase() + action.slice(1), W / 2, 14);
@@ -854,7 +854,7 @@ export class Controller {
         const m = this.mapping[action];
         const expo = m.expo || 0;
 
-        ctx.strokeStyle = AXIS_COLORS[action] || '#4af';
+        ctx.strokeStyle = AXIS_COLORS[action] || '#4272F5';
         ctx.lineWidth = 2;
         ctx.beginPath();
         for (let px = 0; px <= plotW; px++) {
@@ -882,7 +882,7 @@ export class Controller {
                 `<span style="width:24px;text-align:right;color:#aaa;">A${i}</span>` +
                 `<div style="flex:1;height:10px;background:#223;border-radius:3px;overflow:hidden;position:relative;">` +
                 `<div style="position:absolute;left:50%;top:0;width:1px;height:100%;background:#444;"></div>` +
-                `<div style="width:${pct}%;height:100%;background:#4af;border-radius:3px;transition:width 0.05s;"></div>` +
+                `<div style="width:${pct}%;height:100%;background:#4272F5;border-radius:3px;transition:width 0.05s;"></div>` +
                 `</div>` +
                 `<span style="width:40px;text-align:right;font-size:10px;">${val.toFixed(2)}</span>` +
                 `</div>`;
@@ -892,7 +892,7 @@ export class Controller {
         for (let i = 0; i < numBtns; i++) {
             const val = gp.buttons[i].value;
             const pct = val * 100;
-            const color = gp.buttons[i].pressed ? '#4af' : '#335';
+            const color = gp.buttons[i].pressed ? '#4272F5' : '#335';
             html += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">` +
                 `<span style="width:24px;text-align:right;color:#aaa;">B${i}</span>` +
                 `<div style="flex:1;height:10px;background:#223;border-radius:3px;overflow:hidden;">` +

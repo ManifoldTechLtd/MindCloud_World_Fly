@@ -74,7 +74,7 @@ export class HUD {
         if (this.controllerEl) {
             if (controller.connected) {
                 this.controllerEl.textContent = 'RC Connected';
-                this.controllerEl.style.color = '#4af';
+                this.controllerEl.style.color = '#4272F5';
             } else {
                 this.controllerEl.textContent = 'Keyboard';
                 this.controllerEl.style.color = '#0f0';

@@ -182,6 +182,7 @@ function setupOrbitControls() {
             mode = 'loading';
             sceneLoaded = false;
             document.getElementById('placement-overlay')?.classList.remove('visible');
+            document.getElementById('game-logo')?.classList.remove('visible');
             document.getElementById('drop-zone').classList.remove('hidden');
             return;
         }
@@ -440,7 +441,7 @@ async function loadSceneFile(file) {
     dropZone.classList.add('hidden');
     loadingOverlay.classList.add('visible');
     loadingProgress.textContent = 'Reading file...';
-    loadingProgress.style.color = '#4af';
+    loadingProgress.style.color = '#4272F5';
 
     try {
         // Initialize PlayCanvas if not yet done
