@@ -322,9 +322,10 @@ function updateSpawnMarker(pos) {
 function enterPlacementMode() {
     mode = 'placement';
 
-    // Show placement UI, hide flight HUD
+    // Show placement UI, hide flight HUD and logo
     document.getElementById('placement-overlay').classList.add('visible');
     document.getElementById('hud').classList.add('hidden');
+    document.getElementById('game-logo')?.classList.remove('visible');
     updateKeyGuide();
 
     // Auto-set spawn point at origin (or keep current if re-entering)
@@ -355,9 +356,10 @@ function confirmSpawnAndFly() {
 
     mode = 'flight';
 
-    // Hide placement UI, show flight HUD
+    // Hide placement UI, show flight HUD and logo
     document.getElementById('placement-overlay').classList.remove('visible');
     hud.show();
+    document.getElementById('game-logo')?.classList.add('visible');
 
     // Hide spawn marker
     if (spawnMarkerEntity) spawnMarkerEntity.enabled = false;
@@ -519,6 +521,8 @@ async function loadSceneFile(file) {
         sceneLoaded = true;
         mode = 'filtering';
 
+        // Hide logo during filtering
+        document.getElementById('game-logo')?.classList.remove('visible');
         loadingOverlay.classList.remove('visible');
 
         // Show filter UI — user picks coord system + filter sliders
