@@ -61,11 +61,20 @@ export function parseSplatForPositions(arrayBuffer, options = {}) {
         }
     }
 
-    // Compute bounding box
+    // Sanitize NaN/Inf positions to avoid poisoning octree and distance calculations
+    for (let i = 0; i < vertexCount; i++) {
+        const off = i * 3;
+        if (!isFinite(positions[off]))     positions[off]     = 0;
+        if (!isFinite(positions[off + 1])) positions[off + 1] = 0;
+        if (!isFinite(positions[off + 2])) positions[off + 2] = 0;
+    }
+
+    // Compute bounding box (skip NaN/Inf vertices)
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < vertexCount; i++) {
         const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
@@ -107,15 +116,20 @@ export function parseSplatRawCentroid(arrayBuffer) {
     const vertexCount = arrayBuffer.byteLength / SPLAT_RECORD_SIZE;
     const dataView = new DataView(arrayBuffer);
     let cx = 0, cy = 0, cz = 0;
+    let validCount = 0;
 
     for (let i = 0; i < vertexCount; i++) {
         const base = i * SPLAT_RECORD_SIZE;
-        cx += dataView.getFloat32(base, true);
-        cy += dataView.getFloat32(base + 4, true);
-        cz += dataView.getFloat32(base + 8, true);
+        const rx = dataView.getFloat32(base, true);
+        const ry = dataView.getFloat32(base + 4, true);
+        const rz = dataView.getFloat32(base + 8, true);
+        if (!isFinite(rx) || !isFinite(ry) || !isFinite(rz)) continue;
+        cx += rx; cy += ry; cz += rz;
+        validCount++;
     }
 
-    return { x: cx / vertexCount, y: cy / vertexCount, z: cz / vertexCount };
+    if (validCount === 0) return { x: 0, y: 0, z: 0 };
+    return { x: cx / validCount, y: cy / validCount, z: cz / validCount };
 }
 
 /**

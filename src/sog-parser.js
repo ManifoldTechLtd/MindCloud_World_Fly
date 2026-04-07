@@ -130,11 +130,20 @@ export async function parseSogForPositions(arrayBuffer, options = {}) {
         }
     }
 
-    // Compute bounding box
+    // Sanitize NaN/Inf positions to avoid poisoning octree and distance calculations
+    for (let i = 0; i < vertexCount; i++) {
+        const off = i * 3;
+        if (!isFinite(positions[off]))     positions[off]     = 0;
+        if (!isFinite(positions[off + 1])) positions[off + 1] = 0;
+        if (!isFinite(positions[off + 2])) positions[off + 2] = 0;
+    }
+
+    // Compute bounding box (skip NaN/Inf vertices)
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < vertexCount; i++) {
         const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
@@ -188,10 +197,13 @@ export async function parseSogOpacities(arrayBuffer) {
 export async function parseSogRawCentroid(arrayBuffer) {
     const { positions, vertexCount } = await parseSogForPositions(arrayBuffer);
     let cx = 0, cy = 0, cz = 0;
+    let validCount = 0;
     for (let i = 0; i < vertexCount; i++) {
-        cx += positions[i * 3];
-        cy += positions[i * 3 + 1];
-        cz += positions[i * 3 + 2];
+        const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        cx += x; cy += y; cz += z;
+        validCount++;
     }
-    return { x: cx / vertexCount, y: cy / vertexCount, z: cz / vertexCount };
+    if (validCount === 0) return { x: 0, y: 0, z: 0 };
+    return { x: cx / validCount, y: cy / validCount, z: cz / validCount };
 }

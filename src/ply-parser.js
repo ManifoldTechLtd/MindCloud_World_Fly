@@ -134,11 +134,20 @@ export function parsePlyForPositions(arrayBuffer, options = {}) {
         }
     }
 
-    // Compute bounding box
+    // Sanitize NaN/Inf positions to avoid poisoning octree and distance calculations
+    for (let i = 0; i < vertexCount; i++) {
+        const off = i * 3;
+        if (!isFinite(positions[off]))     positions[off]     = 0;
+        if (!isFinite(positions[off + 1])) positions[off + 1] = 0;
+        if (!isFinite(positions[off + 2])) positions[off + 2] = 0;
+    }
+
+    // Compute bounding box (skip NaN/Inf vertices)
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < vertexCount; i++) {
         const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
@@ -277,15 +286,17 @@ export function parsePlyRawCentroid(arrayBuffer) {
     if (xIdx === -1 || yIdx === -1 || zIdx === -1 || vertexCount === 0) return { x: 0, y: 0, z: 0 };
 
     let cx = 0, cy = 0, cz = 0;
+    let validCount = 0;
 
     if (format === 'ascii') {
         const bodyText = decoder.decode(bytes.slice(headerEnd));
         const lines = bodyText.trim().split('\n');
         for (let i = 0; i < vertexCount && i < lines.length; i++) {
             const vals = lines[i].trim().split(/\s+/);
-            cx += parseFloat(vals[xIdx]);
-            cy += parseFloat(vals[yIdx]);
-            cz += parseFloat(vals[zIdx]);
+            const rx = parseFloat(vals[xIdx]), ry = parseFloat(vals[yIdx]), rz = parseFloat(vals[zIdx]);
+            if (!isFinite(rx) || !isFinite(ry) || !isFinite(rz)) continue;
+            cx += rx; cy += ry; cz += rz;
+            validCount++;
         }
     } else {
         const propSizes = properties.map(p => getPropertySize(p.type));
@@ -297,13 +308,17 @@ export function parsePlyRawCentroid(arrayBuffer) {
         const isLittle = format === 'binary_little_endian';
         for (let i = 0; i < vertexCount; i++) {
             const base = i * vertexStride;
-            cx += readFloat(dataView, base + xOff, properties[xIdx].type, isLittle);
-            cy += readFloat(dataView, base + yOff, properties[yIdx].type, isLittle);
-            cz += readFloat(dataView, base + zOff, properties[zIdx].type, isLittle);
+            const rx = readFloat(dataView, base + xOff, properties[xIdx].type, isLittle);
+            const ry = readFloat(dataView, base + yOff, properties[yIdx].type, isLittle);
+            const rz = readFloat(dataView, base + zOff, properties[zIdx].type, isLittle);
+            if (!isFinite(rx) || !isFinite(ry) || !isFinite(rz)) continue;
+            cx += rx; cy += ry; cz += rz;
+            validCount++;
         }
     }
 
-    return { x: cx / vertexCount, y: cy / vertexCount, z: cz / vertexCount };
+    if (validCount === 0) return { x: 0, y: 0, z: 0 };
+    return { x: cx / validCount, y: cy / validCount, z: cz / validCount };
 }
 
 /**
@@ -401,16 +416,21 @@ export function filterPlyByCriteria(arrayBuffer, positions, opacities, vertexCou
  */
 export function analyzePlyDistances(positions, vertexCount) {
     let cx = 0, cy = 0, cz = 0;
+    let validCount = 0;
     for (let i = 0; i < vertexCount; i++) {
-        cx += positions[i * 3]; cy += positions[i * 3 + 1]; cz += positions[i * 3 + 2];
+        const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        cx += x; cy += y; cz += z;
+        validCount++;
     }
-    cx /= vertexCount; cy /= vertexCount; cz /= vertexCount;
+    if (validCount === 0) return { centroid: { x: 0, y: 0, z: 0 }, maxDistance: 1 };
+    cx /= validCount; cy /= validCount; cz /= validCount;
 
     let maxDist = 0;
     for (let i = 0; i < vertexCount; i++) {
-        const dx = positions[i * 3] - cx;
-        const dy = positions[i * 3 + 1] - cy;
-        const dz = positions[i * 3 + 2] - cz;
+        const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        const dx = x - cx, dy = y - cy, dz = z - cz;
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (d > maxDist) maxDist = d;
     }
