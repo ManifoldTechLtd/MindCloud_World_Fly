@@ -500,6 +500,86 @@ impl WindowContext {
         Ok(())
     }
 
+    /// Render split-screen: two cameras, top and bottom halves.
+    /// Each half gets its own prepare (GPU sort) + rasterize pass.
+    pub fn render_split(
+        &mut self,
+        args_top: SplattingArgs,
+        args_bottom: SplattingArgs,
+    ) -> Result<(), wgpu::CurrentSurfaceTexture> {
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            err => return Err(err),
+        };
+        let view_rgb = output.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
+
+        let half_h = self.config.height / 2;
+        let half_viewport = Vector2::new(self.config.width, half_h);
+
+        // We need to render each half separately:
+        // For each camera: prepare → render to display texture → composite to surface viewport
+
+        for (pass_idx, args) in [args_top, args_bottom].iter().enumerate() {
+            let mut args = *args;
+            args.viewport = half_viewport;
+
+            let mut encoder = self.wgpu_context.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor {
+                    label: Some(if pass_idx == 0 { "split top" } else { "split bottom" }),
+                },
+            );
+
+            // Prepare (GPU sort for this camera)
+            self.renderer.prepare(
+                &mut encoder,
+                &self.wgpu_context.device,
+                &self.wgpu_context.queue,
+                &self.pc,
+                args,
+                &mut None,
+            );
+
+            // Rasterize to display texture
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("splat render split"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: self.display.texture(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    ..Default::default()
+                });
+                self.renderer.render(&mut render_pass, &self.pc);
+            }
+
+            // Composite to surface — use Display::render for full-screen composite,
+            // then we rely on the viewport being set by the next copy. For split
+            // screen we render each half to the full display texture, then composite
+            // it into the appropriate half of the surface.
+            self.display.render(
+                &mut encoder,
+                &view_rgb,
+                args.background_color,
+                self.renderer.camera(),
+                &self.renderer.render_settings(),
+            );
+
+            self.wgpu_context.queue.submit([encoder.finish()]);
+        }
+
+        output.present();
+        Ok(())
+    }
+
     fn set_scene(&mut self, scene: Scene) {
         self.splatting_args.scene_extend = Some(scene.extend());
         let mut center = Point3::origin();

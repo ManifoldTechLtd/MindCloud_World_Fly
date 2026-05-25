@@ -12,9 +12,7 @@ use std::{fs::File, path::PathBuf, time::{Duration, Instant}};
 use cgmath::Point3;
 use clap::Parser;
 use drone::{Drone, DroneInput};
-use web_splats::{
-    RenderConfig, WindowContext,
-};
+use web_splats::{RenderConfig, SplattingArgs, WindowContext};
 use winit::{
     dpi::LogicalSize,
     event::{DeviceEvent, ElementState, Event, WindowEvent},
@@ -32,9 +30,13 @@ struct Opt {
     /// Disable V-sync for max framerate
     #[arg(long, default_value_t = false)]
     no_vsync: bool,
+
+    /// Enable split-screen two-player mode
+    #[arg(long, default_value_t = false)]
+    split: bool,
 }
 
-/// Keyboard state for drone control
+/// Per-player keyboard state
 #[derive(Default)]
 struct KeyState {
     w: bool, s: bool, a: bool, d: bool,
@@ -55,6 +57,37 @@ impl KeyState {
     }
 }
 
+/// P2 uses IJKL + TFGH layout (so both players can fly on one keyboard)
+#[derive(Default)]
+struct KeyStateP2 {
+    i: bool, k: bool, j: bool, l: bool,
+    t: bool, g: bool, f: bool, h: bool,
+}
+
+impl KeyStateP2 {
+    fn to_drone_input(&self, armed: bool) -> DroneInput {
+        DroneInput {
+            roll: if self.l { 1.0 } else if self.j { -1.0 } else { 0.0 },
+            pitch: if self.i { 1.0 } else if self.k { -1.0 } else { 0.0 },
+            throttle: if self.t { 0.5 } else if self.g { -1.0 } else { -0.2 },
+            yaw: if self.h { 1.0 } else if self.f { -1.0 } else { 0.0 },
+            armed,
+            boost: false,
+            rates: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Update camera from drone state, fixing near plane for inside-scene flying.
+fn apply_drone_camera(args: &mut SplattingArgs, fly_drone: &Drone, pc: &web_splats::PointCloud) {
+    let (cam_pos, cam_orient) = fly_drone.camera_transform();
+    args.camera.position = Point3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+    args.camera.rotation = cam_orient;
+    let aabb = pc.bbox();
+    args.camera.fit_near_far(aabb);
+    args.camera.projection.znear = 0.1;
+}
+
 #[pollster::main]
 async fn main() {
     env_logger::init();
@@ -65,43 +98,46 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let config = RenderConfig {
-        no_vsync: opt.no_vsync,
-        hdr: false,
-    };
+    let config = RenderConfig { no_vsync: opt.no_vsync, hdr: false };
+    let split = opt.split;
 
-    // Create event loop and window
     let event_loop = EventLoop::new().unwrap();
     let window = event_loop
         .create_window(
             Window::default_attributes()
-                .with_inner_size(LogicalSize::new(1280, 720))
-                .with_title("MindCloud World Fly"),
+                .with_inner_size(LogicalSize::new(1280, if split { 960 } else { 720 }))
+                .with_title(if split { "MindCloud Fly [SPLIT]" } else { "MindCloud World Fly" }),
         )
         .unwrap();
 
-    // Create WindowContext (handles all wgpu + renderer setup internally)
-    let mut state = WindowContext::new(window, data_file, &config)
-        .await
-        .unwrap();
+    let mut state = WindowContext::new(window, data_file, &config).await.unwrap();
     state.pointcloud_file_path = Some(opt.input);
-    state.ui_visible = true;
+    state.ui_visible = !split; // hide web-splat UI in split mode
 
-    // Init drone at PLY origin
-    let mut fly_drone = Drone::new();
-    fly_drone.reset(0.0, 2.0, 0.0);
+    // ---- Player 1 ----
+    let mut drone1 = Drone::new();
+    drone1.reset(0.0, 2.0, 0.0);
+    let mut keys1 = KeyState::default();
+    let mut armed1 = false;
+    let mut drone_mode = !split; // in split mode, always drone; in single, toggle with M
 
-    let mut keys = KeyState::default();
+    // ---- Player 2 (split only) ----
+    let mut drone2 = Drone::new();
+    drone2.reset(2.0, 2.0, 0.0); // offset slightly from P1
+    let mut keys2 = KeyStateP2::default();
+    let mut armed2 = false;
+
+    if split {
+        drone_mode = true;
+        armed1 = true;
+        armed2 = true;
+        log::info!("Split-screen mode: P1=WASD+Arrows, P2=TFGH+IJKL");
+    }
+
     let mut last_time = Instant::now();
-    let mut drone_mode = false; // false = web-splat orbit camera, true = drone FPV
-    let mut armed = false;
-
     let min_wait = state.window
         .current_monitor()
-        .map(|m| {
-            let hz = m.refresh_rate_millihertz().unwrap_or(60_000);
-            Duration::from_millis(1000000 / hz as u64)
-        })
+        .map(|m| Duration::from_millis(1000000 / m.refresh_rate_millihertz().unwrap_or(60_000) as u64))
         .unwrap_or(Duration::from_millis(17));
 
     #[allow(deprecated)]
@@ -115,9 +151,7 @@ async fn main() {
                     && !state.ui_renderer.on_event(&state.window, event) =>
             {
                 match event {
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size, None);
-                    }
+                    WindowEvent::Resized(s) => state.resize(*s, None),
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         state.scale_factor = *scale_factor as f32;
                     }
@@ -129,77 +163,80 @@ async fn main() {
                         if let PhysicalKey::Code(key) = key_event.physical_key {
                             let pressed = key_event.state == ElementState::Pressed;
 
-                            // Toggle drone mode with M key
-                            if key == KeyCode::KeyM && key_event.state == ElementState::Released {
-                                drone_mode = !drone_mode;
-                                if drone_mode {
-                                    // Enter drone mode: start at PLY origin
-                                    fly_drone.reset(0.0, 0.0, 0.0);
-                                    armed = true;
-                                    log::info!("Drone mode ON — armed at origin");
-                                } else {
-                                    armed = false;
-                                    log::info!("Drone mode OFF — orbit camera");
+                            // ---- Global keys ----
+                            if key == KeyCode::Escape { target.exit(); }
+
+                            if !split {
+                                // Single-player: M toggles drone mode
+                                if key == KeyCode::KeyM && key_event.state == ElementState::Released {
+                                    drone_mode = !drone_mode;
+                                    if drone_mode {
+                                        drone1.reset(0.0, 0.0, 0.0);
+                                        armed1 = true;
+                                    } else {
+                                        armed1 = false;
+                                    }
                                 }
                             }
 
+                            // ---- P1 keys (WASD + arrows + Space + R) ----
                             if drone_mode {
-                                // Drone controls
                                 match key {
-                                    KeyCode::KeyW => keys.w = pressed,
-                                    KeyCode::KeyS => keys.s = pressed,
-                                    KeyCode::KeyA => keys.a = pressed,
-                                    KeyCode::KeyD => keys.d = pressed,
-                                    KeyCode::ArrowUp => keys.up = pressed,
-                                    KeyCode::ArrowDown => keys.down = pressed,
-                                    KeyCode::ArrowLeft => keys.left = pressed,
-                                    KeyCode::ArrowRight => keys.right = pressed,
+                                    KeyCode::KeyW => keys1.w = pressed,
+                                    KeyCode::KeyS => keys1.s = pressed,
+                                    KeyCode::KeyA => keys1.a = pressed,
+                                    KeyCode::KeyD => keys1.d = pressed,
+                                    KeyCode::ArrowUp => keys1.up = pressed,
+                                    KeyCode::ArrowDown => keys1.down = pressed,
+                                    KeyCode::ArrowLeft => keys1.left = pressed,
+                                    KeyCode::ArrowRight => keys1.right = pressed,
                                     KeyCode::Space => {
-                                        if pressed {
-                                            armed = !armed;
-                                            log::info!("Armed: {}", armed);
-                                        }
+                                        if pressed { armed1 = !armed1; }
                                     }
                                     KeyCode::KeyR => {
-                                        if pressed {
-                                            fly_drone.reset(0.0, 2.0, 0.0);
-                                        }
+                                        if pressed { drone1.reset(0.0, 2.0, 0.0); }
                                     }
                                     _ => {}
                                 }
                             } else {
-                                // Pass to web-splat's orbit controller
                                 state.controller.process_keyboard(key, pressed);
                             }
 
-                            if key == KeyCode::Escape {
-                                target.exit();
+                            // ---- P2 keys (TFGH + IJKL + Enter + Backspace) ----
+                            if split {
+                                match key {
+                                    KeyCode::KeyT => keys2.t = pressed,
+                                    KeyCode::KeyG => keys2.g = pressed,
+                                    KeyCode::KeyF => keys2.f = pressed,
+                                    KeyCode::KeyH => keys2.h = pressed,
+                                    KeyCode::KeyI => keys2.i = pressed,
+                                    KeyCode::KeyK => keys2.k = pressed,
+                                    KeyCode::KeyJ => keys2.j = pressed,
+                                    KeyCode::KeyL => keys2.l = pressed,
+                                    KeyCode::Enter => {
+                                        if pressed { armed2 = !armed2; }
+                                    }
+                                    KeyCode::Backspace => {
+                                        if pressed { drone2.reset(2.0, 2.0, 0.0); }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
                         if !drone_mode {
                             match delta {
-                                winit::event::MouseScrollDelta::LineDelta(_, dy) => {
-                                    state.controller.process_scroll(*dy);
-                                }
-                                winit::event::MouseScrollDelta::PixelDelta(p) => {
-                                    state.controller.process_scroll(p.y as f32 / 100.);
-                                }
+                                winit::event::MouseScrollDelta::LineDelta(_, dy) => state.controller.process_scroll(*dy),
+                                winit::event::MouseScrollDelta::PixelDelta(p) => state.controller.process_scroll(p.y as f32 / 100.),
                             }
                         }
                     }
-                    WindowEvent::MouseInput { state: button_state, button, .. } => {
+                    WindowEvent::MouseInput { state: bs, button, .. } => {
                         if !drone_mode {
                             match button {
-                                winit::event::MouseButton::Left => {
-                                    state.controller.left_mouse_pressed =
-                                        *button_state == ElementState::Pressed;
-                                }
-                                winit::event::MouseButton::Right => {
-                                    state.controller.right_mouse_pressed =
-                                        *button_state == ElementState::Pressed;
-                                }
+                                winit::event::MouseButton::Left => state.controller.left_mouse_pressed = *bs == ElementState::Pressed,
+                                winit::event::MouseButton::Right => state.controller.right_mouse_pressed = *bs == ElementState::Pressed,
                                 _ => {}
                             }
                         }
@@ -211,65 +248,83 @@ async fn main() {
                         let now = Instant::now();
                         let dt = now - last_time;
                         last_time = now;
+                        let dt_s = dt.as_secs_f32();
 
-                        if drone_mode {
-                            // Drone physics drives camera
-                            let input = keys.to_drone_input(armed);
-                            fly_drone.update(dt.as_secs_f32(), &input);
+                        state.fps = (1.0 / dt_s) * 0.05 + state.fps * 0.95;
 
-                            let (cam_pos, cam_orient) = fly_drone.camera_transform();
-                            state.splatting_args.camera.position =
-                                Point3::new(cam_pos.x, cam_pos.y, cam_pos.z);
-                            state.splatting_args.camera.rotation = cam_orient;
+                        if split {
+                            // ---- Split-screen: update both drones ----
+                            let input1 = keys1.to_drone_input(armed1);
+                            drone1.update(dt_s, &input1);
 
-                            // Fit near/far for scene visibility
-                            let aabb = state.pc.bbox();
-                            state.splatting_args.camera.fit_near_far(aabb);
-                            // Override znear to be small (we're inside the scene)
-                            state.splatting_args.camera.projection.znear = 0.1;
+                            let input2 = keys2.to_drone_input(armed2);
+                            drone2.update(dt_s, &input2);
 
-                            // Update title
-                            state.fps = (1. / dt.as_secs_f32()) * 0.05 + state.fps * 0.95;
+                            // Build splatting args for each camera
+                            let mut args_top = state.splatting_args;
+                            apply_drone_camera(&mut args_top, &drone1, &state.pc);
+
+                            let mut args_bottom = state.splatting_args;
+                            apply_drone_camera(&mut args_bottom, &drone2, &state.pc);
+
+                            // Render split
+                            match state.render_split(args_top, args_bottom) {
+                                Ok(_) => {}
+                                Err(wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost) => {
+                                    state.resize(state.window.inner_size(), None);
+                                }
+                                Err(e) => eprintln!("render error: {:?}", e),
+                            }
+
+                            state.window.set_title(&format!(
+                                "MindCloud Fly [SPLIT] — {:.0} FPS | P1:{} P2:{}",
+                                state.fps,
+                                if armed1 { "ARMED" } else { "OFF" },
+                                if armed2 { "ARMED" } else { "OFF" },
+                            ));
+                        } else if drone_mode {
+                            // ---- Single player drone ----
+                            let input1 = keys1.to_drone_input(armed1);
+                            drone1.update(dt_s, &input1);
+                            apply_drone_camera(&mut state.splatting_args, &drone1, &state.pc);
+
+                            let (_redraw_ui, shapes) = state.ui();
+                            match state.render(true, state.ui_visible.then_some(shapes)) {
+                                Ok(_) => {}
+                                Err(wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost) => {
+                                    state.resize(state.window.inner_size(), None);
+                                }
+                                Err(e) => eprintln!("render error: {:?}", e),
+                            }
+
                             state.window.set_title(&format!(
                                 "MindCloud Fly [DRONE] — {:.0} FPS | Armed: {}",
-                                state.fps, armed
+                                state.fps, armed1
                             ));
                         } else {
-                            // web-splat's orbit camera controller
+                            // ---- Orbit camera ----
                             state.update(dt);
-                            state.fps = (1. / dt.as_secs_f32()) * 0.05 + state.fps * 0.95;
+                            let (_redraw_ui, shapes) = state.ui();
+                            match state.render(true, state.ui_visible.then_some(shapes)) {
+                                Ok(_) => {}
+                                Err(wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost) => {
+                                    state.resize(state.window.inner_size(), None);
+                                }
+                                Err(e) => eprintln!("render error: {:?}", e),
+                            }
                             state.window.set_title(&format!(
-                                "MindCloud Fly [ORBIT] — {:.0} FPS | Press M for drone mode",
+                                "MindCloud Fly [ORBIT] — {:.0} FPS | Press M for drone",
                                 state.fps
                             ));
                         }
 
-                        let (_redraw_ui, shapes) = state.ui();
-                        match state.render(true, state.ui_visible.then_some(shapes)) {
-                            Ok(_) => {}
-                            Err(wgpu::CurrentSurfaceTexture::Suboptimal(_)) => {
-                                state.resize(state.window.inner_size(), None);
-                            }
-                            Err(wgpu::CurrentSurfaceTexture::Lost) => {
-                                state.resize(state.window.inner_size(), None);
-                            }
-                            Err(e) => eprintln!("render error: {:?}", e),
-                        }
-
-                        if config.no_vsync {
-                            state.window.request_redraw();
-                        }
+                        if config.no_vsync { state.window.request_redraw(); }
                     }
                     _ => {}
                 }
             }
-            Event::DeviceEvent {
-                event: DeviceEvent::MouseMotion { delta },
-                ..
-            } => {
-                if !drone_mode {
-                    state.controller.process_mouse(delta.0 as f32, delta.1 as f32);
-                }
+            Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
+                if !drone_mode { state.controller.process_mouse(delta.0 as f32, delta.1 as f32); }
             }
             _ => {}
         }

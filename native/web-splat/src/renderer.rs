@@ -571,6 +571,14 @@ impl Display {
         self.view = view;
     }
 
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    pub fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
+    }
+
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
