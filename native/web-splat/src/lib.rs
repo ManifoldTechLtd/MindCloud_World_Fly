@@ -501,7 +501,7 @@ impl WindowContext {
     }
 
     /// Render split-screen: two cameras, top and bottom halves.
-    /// Each half gets its own prepare (GPU sort) + rasterize pass.
+    /// Each half gets its own prepare (GPU sort) + rasterize + composite pass.
     pub fn render_split(
         &mut self,
         args_top: SplattingArgs,
@@ -517,15 +517,15 @@ impl WindowContext {
             ..Default::default()
         });
 
-        let half_h = self.config.height / 2;
-        let half_viewport = Vector2::new(self.config.width, half_h);
+        let w = self.config.width as f32;
+        let half_h = self.config.height as f32 / 2.0;
 
-        // We need to render each half separately:
-        // For each camera: prepare → render to display texture → composite to surface viewport
+        let cameras = [args_top, args_bottom];
 
-        for (pass_idx, args) in [args_top, args_bottom].iter().enumerate() {
+        for (pass_idx, args) in cameras.iter().enumerate() {
             let mut args = *args;
-            args.viewport = half_viewport;
+            // Tell the splat renderer the viewport is half-height
+            args.viewport = Vector2::new(self.config.width, (half_h as u32).max(1));
 
             let mut encoder = self.wgpu_context.device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor {
@@ -533,7 +533,7 @@ impl WindowContext {
                 },
             );
 
-            // Prepare (GPU sort for this camera)
+            // 1. Prepare (GPU sort for this camera)
             self.renderer.prepare(
                 &mut encoder,
                 &self.wgpu_context.device,
@@ -543,7 +543,7 @@ impl WindowContext {
                 &mut None,
             );
 
-            // Rasterize to display texture
+            // 2. Rasterize splats to display texture (full-size intermediate texture)
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("splat render split"),
@@ -561,16 +561,18 @@ impl WindowContext {
                 self.renderer.render(&mut render_pass, &self.pc);
             }
 
-            // Composite to surface — use Display::render for full-screen composite,
-            // then we rely on the viewport being set by the next copy. For split
-            // screen we render each half to the full display texture, then composite
-            // it into the appropriate half of the surface.
-            self.display.render(
+            // 3. Composite to surface viewport (top or bottom half)
+            let y_offset = if pass_idx == 0 { 0.0 } else { half_h };
+            let viewport = Some([0.0, y_offset, w, half_h]);
+            let clear = pass_idx == 0; // Clear on first pass, Load on second
+            self.display.render_to_region(
                 &mut encoder,
                 &view_rgb,
                 args.background_color,
                 self.renderer.camera(),
                 &self.renderer.render_settings(),
+                viewport,
+                clear,
             );
 
             self.wgpu_context.queue.submit([encoder.finish()]);

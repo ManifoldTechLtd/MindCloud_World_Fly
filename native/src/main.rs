@@ -275,11 +275,35 @@ async fn main() {
                             let input2 = keys2.to_drone_input(armed2);
                             drone2.update(dt_s, &input2);
 
-                            // Render P1 view (split viewport WIP)
-                            apply_drone_camera(&mut state, &drone1, dt);
+                            // Update walltime for both
+                            if state.splatting_args.walltime < std::time::Duration::from_secs(5) {
+                                state.splatting_args.walltime += dt;
+                            }
 
-                            let (_redraw_ui, shapes) = state.ui();
-                            match state.render(true, None) {
+                            // Build camera args for each player
+                            let mut args_top = state.splatting_args;
+                            {
+                                let (p, r) = drone1.camera_transform();
+                                args_top.camera.position = Point3::new(p.x, p.y, p.z);
+                                args_top.camera.rotation = r;
+                                args_top.camera.projection.resize(state.config.width, state.config.height / 2);
+                                let aabb = state.pc.bbox();
+                                args_top.camera.fit_near_far(aabb);
+                                args_top.camera.projection.znear = 0.1;
+                            }
+
+                            let mut args_bottom = state.splatting_args;
+                            {
+                                let (p, r) = drone2.camera_transform();
+                                args_bottom.camera.position = Point3::new(p.x, p.y, p.z);
+                                args_bottom.camera.rotation = r;
+                                args_bottom.camera.projection.resize(state.config.width, state.config.height / 2);
+                                let aabb = state.pc.bbox();
+                                args_bottom.camera.fit_near_far(aabb);
+                                args_bottom.camera.projection.znear = 0.1;
+                            }
+
+                            match state.render_split(args_top, args_bottom) {
                                 Ok(_) => {}
                                 Err(wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost) => {
                                     state.resize(state.window.inner_size(), None);

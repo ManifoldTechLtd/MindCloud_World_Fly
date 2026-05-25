@@ -587,19 +587,42 @@ impl Display {
         camera: &UniformBuffer<CameraUniform>,
         render_settings: &UniformBuffer<SplattingArgsUniform>,
     ) {
+        self.render_to_region(encoder, target, background_color, camera, render_settings, None, true);
+    }
+
+    /// Render the display quad to a specific viewport region of the target.
+    /// If `viewport` is None, renders full-screen. If `clear` is false, loads existing content.
+    pub fn render_to_region(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        background_color: wgpu::Color,
+        camera: &UniformBuffer<CameraUniform>,
+        render_settings: &UniformBuffer<SplattingArgsUniform>,
+        viewport: Option<[f32; 4]>, // [x, y, width, height]
+        clear: bool,
+    ) {
+        let load_op = if clear {
+            wgpu::LoadOp::Clear(background_color)
+        } else {
+            wgpu::LoadOp::Load
+        };
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("render pass"),
+            label: Some("display render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(background_color),
+                    load: load_op,
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
             })],
             ..Default::default()
         });
+        if let Some([x, y, w, h]) = viewport {
+            render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        }
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_bind_group(1, camera.bind_group(), &[]);
         render_pass.set_bind_group(2, render_settings.bind_group(), &[]);
