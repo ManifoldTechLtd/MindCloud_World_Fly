@@ -1,3 +1,4 @@
+mod collision;
 mod drone;
 
 use std::{fs::File, io::{Read, Seek}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
