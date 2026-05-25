@@ -1,7 +1,7 @@
 /// HUD overlay — telemetry + race panel.
 /// Ported from src/hud.js + src/osd.js, rendered via egui.
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
 
 use crate::drone::Drone;
 use crate::gates::{self, GateCourse};

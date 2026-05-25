@@ -7,13 +7,13 @@ mod input;
 mod persistence;
 mod spline;
 
-use std::{fs::File, io::{Read, Seek}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use std::{fs::File, path::PathBuf, time::{Duration, Instant}};
 
-use cgmath::{Deg, Point3, Quaternion, Rad, Vector2};
+use cgmath::Point3;
 use clap::Parser;
 use drone::{Drone, DroneInput};
 use web_splats::{
-    PerspectiveCamera, PerspectiveProjection, RenderConfig, WindowContext,
+    RenderConfig, WindowContext,
 };
 use winit::{
     dpi::LogicalSize,
@@ -244,7 +244,7 @@ async fn main() {
                             ));
                         }
 
-                        let (redraw_ui, shapes) = state.ui();
+                        let (_redraw_ui, shapes) = state.ui();
                         match state.render(true, state.ui_visible.then_some(shapes)) {
                             Ok(_) => {}
                             Err(wgpu::CurrentSurfaceTexture::Suboptimal(_)) => {

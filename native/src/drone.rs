@@ -9,7 +9,7 @@
 /// FPV:   sticks → body-frame angular rates, throttle → thrust, no self-leveling
 /// Drone: sticks → velocity command → position setpoint, cascaded PID
 
-use cgmath::{InnerSpace, Matrix3, Matrix4, Quaternion, Rad, Rotation, Rotation3, SquareMatrix, Vector3, Zero};
+use cgmath::{InnerSpace, Matrix3, Quaternion, Rad, Rotation, Rotation3, SquareMatrix, Vector3};
 
 const DEG2RAD: f32 = std::f32::consts::PI / 180.0;
 const RAD2DEG: f32 = 180.0 / std::f32::consts::PI;

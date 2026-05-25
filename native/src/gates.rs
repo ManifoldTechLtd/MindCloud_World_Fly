@@ -2,7 +2,7 @@
 /// Handles gate layout, pass-through detection, and lap timing.
 /// Rendering is NOT included here (separate wgpu pass later).
 
-use cgmath::{InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, Vector4};
+use cgmath::{InnerSpace, Matrix4, SquareMatrix, Vector3, Vector4};
 
 use crate::spline;
 
@@ -75,7 +75,7 @@ impl GateCourse {
 
         if points.len() < 3 { return; }
 
-        let half = self.gate_size * 0.5;
+        let _half = self.gate_size * 0.5;
 
         for i in 0..points.len() {
             let pos = points[i];

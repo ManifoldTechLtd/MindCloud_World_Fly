@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use cgmath::Vector3;
 
 /// Per-scene gate path record (stored as JSON).
 #[derive(Serialize, Deserialize, Debug, Clone)]
