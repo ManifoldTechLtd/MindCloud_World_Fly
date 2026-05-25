@@ -9,3 +9,4 @@ asset/music/fpv.wav
 asset/music/**/*.zip
 asset/music/*.zip
 tools/
+tmp/
