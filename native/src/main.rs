@@ -123,11 +123,10 @@ async fn main() {
                             if key == KeyCode::KeyM && key_event.state == ElementState::Released {
                                 drone_mode = !drone_mode;
                                 if drone_mode {
-                                    // Enter drone mode: place drone at current camera pos
-                                    let pos = state.splatting_args.camera.position;
-                                    fly_drone.reset(pos.x, pos.y, pos.z);
+                                    // Enter drone mode: start at PLY origin
+                                    fly_drone.reset(0.0, 0.0, 0.0);
                                     fly_drone.armed = true;
-                                    log::info!("Drone mode ON — armed at ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
+                                    log::info!("Drone mode ON — armed at origin");
                                 } else {
                                     fly_drone.armed = false;
                                     log::info!("Drone mode OFF — orbit camera");
