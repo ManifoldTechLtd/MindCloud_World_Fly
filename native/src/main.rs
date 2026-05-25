@@ -1,6 +1,7 @@
 mod collision;
 mod drone;
 mod gates;
+mod hud;
 mod input;
 mod spline;
 
