@@ -1,8 +1,10 @@
+mod audio;
 mod collision;
 mod drone;
 mod gates;
 mod hud;
 mod input;
+mod persistence;
 mod spline;
 
 use std::{fs::File, io::{Read, Seek}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
