@@ -7,7 +7,7 @@ description = "MindCloud World Fly — native split-screen FPV drone racing simu
 
 [dependencies]
 # GSplat rendering (GPU radix sort, PLY loading, SH evaluation)
-web_splats = { git = "https://github.com/KeKsBoTer/web-splat.git" }
+web_splats = { path = "web-splat" }
 
 # Core
 wgpu = "29.0.1"

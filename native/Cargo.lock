@@ -3538,7 +3538,6 @@ dependencies = [
 [[package]]
 name = "web_splats"
 version = "0.1.0"
-source = "git+https://github.com/KeKsBoTer/web-splat.git#f1223191ab826867648635bd3ab49f263776bfaa"
 dependencies = [
  "anyhow",
  "bytemuck",

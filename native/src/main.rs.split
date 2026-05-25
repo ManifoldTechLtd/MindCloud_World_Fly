@@ -78,29 +78,14 @@ impl KeyStateP2 {
     }
 }
 
-/// Update camera from drone state.
-/// Mirrors what web-splat's update() does but with drone position/orientation.
-fn apply_drone_camera(
-    state: &mut WindowContext,
-    fly_drone: &Drone,
-    dt: std::time::Duration,
-) {
-    // Increment walltime (web-splat uses this for fade-in effects)
-    if state.splatting_args.walltime < std::time::Duration::from_secs(5) {
-        state.splatting_args.walltime += dt;
-    }
-
+/// Update camera from drone state, fixing near plane for inside-scene flying.
+fn apply_drone_camera(args: &mut SplattingArgs, fly_drone: &Drone, pc: &web_splats::PointCloud) {
     let (cam_pos, cam_orient) = fly_drone.camera_transform();
-    state.splatting_args.camera.position = Point3::new(cam_pos.x, cam_pos.y, cam_pos.z);
-    state.splatting_args.camera.rotation = cam_orient;
-
-    // Resize projection to match current window (critical — without this, viewport mismatch)
-    state.splatting_args.camera.projection.resize(state.config.width, state.config.height);
-
-    // fit_near_far then override znear for inside-scene flying
-    let aabb = state.pc.bbox();
-    state.splatting_args.camera.fit_near_far(aabb);
-    state.splatting_args.camera.projection.znear = 0.1;
+    args.camera.position = Point3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+    args.camera.rotation = cam_orient;
+    let aabb = pc.bbox();
+    args.camera.fit_near_far(aabb);
+    args.camera.projection.znear = 0.1;
 }
 
 #[pollster::main]
@@ -275,11 +260,15 @@ async fn main() {
                             let input2 = keys2.to_drone_input(armed2);
                             drone2.update(dt_s, &input2);
 
-                            // Render P1 view (split viewport WIP)
-                            apply_drone_camera(&mut state, &drone1, dt);
+                            // Build splatting args for each camera
+                            let mut args_top = state.splatting_args;
+                            apply_drone_camera(&mut args_top, &drone1, &state.pc);
 
-                            let (_redraw_ui, shapes) = state.ui();
-                            match state.render(true, None) {
+                            let mut args_bottom = state.splatting_args;
+                            apply_drone_camera(&mut args_bottom, &drone2, &state.pc);
+
+                            // Render split
+                            match state.render_split(args_top, args_bottom) {
                                 Ok(_) => {}
                                 Err(wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost) => {
                                     state.resize(state.window.inner_size(), None);
@@ -297,7 +286,7 @@ async fn main() {
                             // ---- Single player drone ----
                             let input1 = keys1.to_drone_input(armed1);
                             drone1.update(dt_s, &input1);
-                            apply_drone_camera(&mut state, &drone1, dt);
+                            apply_drone_camera(&mut state.splatting_args, &drone1, &state.pc);
 
                             let (_redraw_ui, shapes) = state.ui();
                             match state.render(true, state.ui_visible.then_some(shapes)) {
