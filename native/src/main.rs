@@ -35,12 +35,15 @@ struct KeyState {
 }
 
 impl KeyState {
-    fn to_drone_input(&self) -> DroneInput {
+    fn to_drone_input(&self, armed: bool) -> DroneInput {
         DroneInput {
             roll: if self.right { 1.0 } else if self.left { -1.0 } else { 0.0 },
             pitch: if self.up { 1.0 } else if self.down { -1.0 } else { 0.0 },
             throttle: if self.w { 0.5 } else if self.s { -1.0 } else { -0.2 },
             yaw: if self.d { 1.0 } else if self.a { -1.0 } else { 0.0 },
+            armed,
+            boost: false,
+            rates: [1.0, 1.0, 1.0],
         }
     }
 }
@@ -80,11 +83,11 @@ async fn main() {
     // Init drone at PLY origin
     let mut fly_drone = Drone::new();
     fly_drone.reset(0.0, 2.0, 0.0);
-    fly_drone.armed = false;
 
     let mut keys = KeyState::default();
     let mut last_time = Instant::now();
     let mut drone_mode = false; // false = web-splat orbit camera, true = drone FPV
+    let mut armed = false;
 
     let min_wait = state.window
         .current_monitor()
@@ -125,10 +128,10 @@ async fn main() {
                                 if drone_mode {
                                     // Enter drone mode: start at PLY origin
                                     fly_drone.reset(0.0, 0.0, 0.0);
-                                    fly_drone.armed = true;
+                                    armed = true;
                                     log::info!("Drone mode ON — armed at origin");
                                 } else {
-                                    fly_drone.armed = false;
+                                    armed = false;
                                     log::info!("Drone mode OFF — orbit camera");
                                 }
                             }
@@ -146,7 +149,8 @@ async fn main() {
                                     KeyCode::ArrowRight => keys.right = pressed,
                                     KeyCode::Space => {
                                         if pressed {
-                                            fly_drone.armed = !fly_drone.armed;
+                                            armed = !armed;
+                                            log::info!("Armed: {}", armed);
                                         }
                                     }
                                     KeyCode::KeyR => {
@@ -203,7 +207,7 @@ async fn main() {
 
                         if drone_mode {
                             // Drone physics drives camera
-                            let input = keys.to_drone_input();
+                            let input = keys.to_drone_input(armed);
                             fly_drone.update(dt.as_secs_f32(), &input);
 
                             let (cam_pos, cam_orient) = fly_drone.camera_transform();
@@ -221,7 +225,7 @@ async fn main() {
                             state.fps = (1. / dt.as_secs_f32()) * 0.05 + state.fps * 0.95;
                             state.window.set_title(&format!(
                                 "MindCloud Fly [DRONE] — {:.0} FPS | Armed: {}",
-                                state.fps, fly_drone.armed
+                                state.fps, armed
                             ));
                         } else {
                             // web-splat's orbit camera controller
