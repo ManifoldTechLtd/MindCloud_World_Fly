@@ -257,3 +257,66 @@ impl Controller {
         v > map.threshold
     }
 }
+
+// ---- HID device management ----
+
+/// Info about an available HID device.
+#[derive(Debug, Clone)]
+pub struct HidDeviceInfo {
+    pub path: std::ffi::CString,
+    pub product_name: String,
+    pub vendor_id: u16,
+    pub product_id: u16,
+}
+
+/// List all available HID devices.
+pub fn list_hid_devices() -> Vec<HidDeviceInfo> {
+    let api = match hidapi::HidApi::new() {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("Failed to init hidapi: {}", e);
+            return Vec::new();
+        }
+    };
+    api.device_list()
+        .map(|d| HidDeviceInfo {
+            path: d.path().to_owned(),
+            product_name: d.product_string().unwrap_or("Unknown").to_string(),
+            vendor_id: d.vendor_id(),
+            product_id: d.product_id(),
+        })
+        .collect()
+}
+
+/// Open a HID device by path and start reading reports in a background thread.
+/// Returns a receiver that yields raw report byte vectors.
+pub fn open_hid_device(
+    path: &std::ffi::CStr,
+) -> Result<std::sync::mpsc::Receiver<Vec<u8>>, String> {
+    let api = hidapi::HidApi::new().map_err(|e| format!("hidapi init: {}", e))?;
+    let device = api.open_path(path).map_err(|e| format!("open_path: {}", e))?;
+    device.set_blocking_mode(true).map_err(|e| format!("set_blocking: {}", e))?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        loop {
+            match device.read_timeout(&mut buf, 50) {
+                Ok(0) => continue, // timeout, no data
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break; // receiver dropped
+                    }
+                }
+                Err(e) => {
+                    log::error!("HID read error: {}", e);
+                    break;
+                }
+            }
+        }
+        log::info!("HID reader thread exited");
+    });
+
+    Ok(rx)
+}

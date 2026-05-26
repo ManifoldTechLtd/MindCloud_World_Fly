@@ -27,7 +27,7 @@ egui-wgpu = "0.34.0"
 egui-winit = { version = "0.34.0", default-features = false }
 
 # Input
-# hidapi = "2.6"  # TODO: Phase 3
+hidapi = "2.6"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
