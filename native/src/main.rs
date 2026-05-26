@@ -303,7 +303,31 @@ async fn main() {
                                 args_bottom.camera.projection.znear = 0.1;
                             }
 
-                            match state.render_split(args_top, args_bottom) {
+                            // Draw per-player HUD via egui
+                            state.ui_renderer.begin_frame(&state.window);
+                            {
+                                let ctx = state.ui_renderer.winit.egui_ctx().clone();
+                                // Use egui's logical screen rect (accounts for scale factor)
+                                let screen = ctx.screen_rect();
+                                let half_h = screen.height() / 2.0;
+                                let w = screen.width();
+                                hud::draw_hud(
+                                    &ctx, &drone1, None, armed1, state.fps,
+                                    Some("P1"),
+                                    Some(egui::Rect::from_min_size(screen.min, egui::Vec2::new(w, half_h))),
+                                );
+                                hud::draw_hud(
+                                    &ctx, &drone2, None, armed2, state.fps,
+                                    Some("P2"),
+                                    Some(egui::Rect::from_min_size(
+                                        egui::Pos2::new(screen.min.x, screen.min.y + half_h),
+                                        egui::Vec2::new(w, half_h),
+                                    )),
+                                );
+                            }
+                            let egui_output = state.ui_renderer.end_frame(&state.window);
+
+                            match state.render_split(args_top, args_bottom, Some(egui_output)) {
                                 Ok(_) => {}
                                 Err(wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost) => {
                                     state.resize(state.window.inner_size(), None);

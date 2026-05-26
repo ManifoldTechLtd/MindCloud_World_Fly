@@ -502,10 +502,12 @@ impl WindowContext {
 
     /// Render split-screen: two cameras, top and bottom halves.
     /// Each half gets its own prepare (GPU sort) + rasterize + composite pass.
+    /// If `egui_output` is provided, renders the egui UI on top after both halves.
     pub fn render_split(
         &mut self,
         args_top: SplattingArgs,
         args_bottom: SplattingArgs,
+        egui_output: Option<FullOutput>,
     ) -> Result<(), wgpu::CurrentSurfaceTexture> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -575,6 +577,45 @@ impl WindowContext {
                 clear,
             );
 
+            self.wgpu_context.queue.submit([encoder.finish()]);
+        }
+
+        // Optional egui overlay (HUD) on top of the split-screen
+        if let Some(egui_out) = egui_output {
+            let view_srgb = output.texture.create_view(&Default::default());
+            let mut encoder = self.wgpu_context.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("egui split") },
+            );
+            let ui_state = self.ui_renderer.prepare(
+                PhysicalSize {
+                    width: output.texture.size().width,
+                    height: output.texture.size().height,
+                },
+                self.scale_factor,
+                &self.wgpu_context.device,
+                &self.wgpu_context.queue,
+                &mut encoder,
+                egui_out,
+            );
+            {
+                let mut render_pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("egui split pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view_srgb,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        ..Default::default()
+                    })
+                    .forget_lifetime();
+                self.ui_renderer.render(&mut render_pass, &ui_state);
+            }
+            self.ui_renderer.cleanup(ui_state);
             self.wgpu_context.queue.submit([encoder.finish()]);
         }
 
