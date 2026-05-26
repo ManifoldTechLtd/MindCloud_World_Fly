@@ -5,6 +5,7 @@ mod gates;
 mod hud;
 mod input;
 mod persistence;
+mod settings;
 mod spline;
 
 use std::{fs::File, path::PathBuf, time::{Duration, Instant}};
@@ -201,6 +202,8 @@ async fn main() {
         log::info!("Split-screen mode: P1=WASD+Arrows, P2=TFGH+IJKL");
     }
 
+    let mut settings_open = false;
+    let mut controller1 = input::Controller::new();
     let mut last_time = Instant::now();
     let min_wait = state.window
         .current_monitor()
@@ -232,6 +235,9 @@ async fn main() {
 
                             // ---- Global keys ----
                             if key == KeyCode::Escape { target.exit(); }
+                            if key == KeyCode::F1 && key_event.state == ElementState::Released {
+                                settings_open = !settings_open;
+                            }
 
                             if !split {
                                 // Single-player: M toggles drone mode
@@ -376,6 +382,8 @@ async fn main() {
                                         egui::Vec2::new(w, half_h),
                                     )),
                                 );
+                                // Settings panel (shared, rendered on top)
+                                settings::draw_settings(&ctx, &mut settings_open, &mut drone1, &mut controller1, &mut armed1);
                             }
                             let egui_output = state.ui_renderer.end_frame(&state.window);
 

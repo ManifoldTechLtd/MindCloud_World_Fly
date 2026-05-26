@@ -1,1 +1,9 @@
-native/target/
+target/
+web-splat/.github/
+web-splat/public/
+web-splat/Cargo.lock
+web-splat/LICENSE
+web-splat/README.md
+web-splat/build_wasm.sh
+web-splat/.gitignore
+web-splat/img/
