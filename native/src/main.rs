@@ -24,8 +24,8 @@ use winit::{
 #[derive(Debug, Parser)]
 #[command(author, version, about = "MindCloud World Fly — native FPV drone racing simulator")]
 struct Opt {
-    /// Input PLY/splat scene file
-    input: PathBuf,
+    /// Input PLY/splat scene file (opens file dialog if not provided)
+    input: Option<PathBuf>,
 
     /// Disable V-sync for max framerate
     #[arg(long, default_value_t = false)]
@@ -34,6 +34,55 @@ struct Opt {
     /// Enable split-screen two-player mode
     #[arg(long, default_value_t = false)]
     split: bool,
+}
+
+/// Resolve scene file path: use CLI arg, or open native file picker dialog.
+fn resolve_scene_path(cli_input: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = cli_input {
+        return p;
+    }
+
+    // Try native file dialog
+    eprintln!("No scene file specified — opening file picker...");
+    if let Some(path) = rfd::FileDialog::new()
+        .set_title("Select a Gaussian Splat scene file")
+        .add_filter("Gaussian Splat", &["ply", "splat", "sog"])
+        .pick_file()
+    {
+        return path;
+    }
+
+    // Fallback: scan current directory and scene/ for .ply files
+    let candidates: Vec<_> = [".", "scene"]
+        .iter()
+        .flat_map(|dir| {
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map_or(false, |ext| ext == "ply" || ext == "splat")
+                })
+                .map(|e| e.path())
+        })
+        .collect();
+
+    if candidates.len() == 1 {
+        eprintln!("Auto-selected: {:?}", candidates[0]);
+        return candidates[0].clone();
+    }
+    if !candidates.is_empty() {
+        eprintln!("Multiple scene files found:");
+        for (i, c) in candidates.iter().enumerate() {
+            eprintln!("  [{}] {:?}", i, c);
+        }
+        eprintln!("Please specify one as a command-line argument.");
+    } else {
+        eprintln!("No .ply or .splat files found. Pass a scene file as argument.");
+    }
+    std::process::exit(1);
 }
 
 /// Per-player keyboard state
@@ -108,8 +157,11 @@ async fn main() {
     env_logger::init();
     let opt = Opt::parse();
 
-    let data_file = File::open(&opt.input).unwrap_or_else(|e| {
-        eprintln!("Failed to open {:?}: {}", opt.input, e);
+    let scene_path = resolve_scene_path(opt.input);
+    log::info!("Loading scene: {:?}", scene_path);
+
+    let data_file = File::open(&scene_path).unwrap_or_else(|e| {
+        eprintln!("Failed to open {:?}: {}", scene_path, e);
         std::process::exit(1);
     });
 
@@ -126,7 +178,7 @@ async fn main() {
         .unwrap();
 
     let mut state = WindowContext::new(window, data_file, &config).await.unwrap();
-    state.pointcloud_file_path = Some(opt.input);
+    state.pointcloud_file_path = Some(scene_path);
     state.ui_visible = !split; // hide web-splat UI in split mode
 
     // ---- Player 1 ----

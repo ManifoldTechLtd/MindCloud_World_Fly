@@ -1,0 +1,12 @@
+**/*.js
+**/*.wasm
+public/scenes
+/target
+*.ply
+*.json
+*.npz
+**/*.png
+
+videos/
+particle-data-RAW/
+*.exr
