@@ -18,6 +18,7 @@ pub fn draw_settings(
     egui::Window::new("⚙ Settings")
         .open(open)
         .default_width(300.0)
+        .order(egui::Order::Tooltip)
         .show(ctx, |ui| {
             egui::CollapsingHeader::new("Flight Mode")
                 .default_open(true)

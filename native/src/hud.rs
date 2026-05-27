@@ -80,7 +80,7 @@ pub fn draw_hud(
     // ---- Fighter-jet OSD (custom paint directly on screen layer) ----
     {
         let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
+            egui::Order::Middle,
             egui::Id::new(format!("osd_{}", area_id)),
         ));
         let cx = vp.center().x;
