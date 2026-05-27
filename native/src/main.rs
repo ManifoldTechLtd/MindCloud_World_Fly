@@ -17,7 +17,7 @@ use egui::Color32;
 use cgmath::Point3;
 use clap::Parser;
 use drone::{Drone, DroneInput};
-use web_splats::{RenderConfig, SplattingArgs, WGPUContext, WindowContext};
+use web_splats::{AppGpu, SceneState, SplattingArgs};
 use winit::{
     dpi::LogicalSize,
     event::{DeviceEvent, ElementState, Event, WindowEvent},
@@ -53,13 +53,14 @@ impl KeyStateP2 {
     }
 }
 
-fn apply_drone_cam(s: &mut WindowContext, d: &Drone, dt: Duration) {
-    if s.splatting_args.walltime < Duration::from_secs(5) { s.splatting_args.walltime += dt; }
-    let (p,r) = d.camera_transform();
-    s.splatting_args.camera.position = Point3::new(p.x,p.y,p.z);
-    s.splatting_args.camera.rotation = r;
-    s.splatting_args.camera.projection.resize(s.config.width, s.config.height);
-    let a = s.pc.bbox(); s.splatting_args.camera.fit_near_far(a); s.splatting_args.camera.projection.znear = 0.1;
+fn apply_drone_cam(scene: &mut SceneState, d: &Drone, dt: Duration) {
+    if scene.splatting_args.walltime < Duration::from_secs(5) { scene.splatting_args.walltime += dt; }
+    let (p, r) = d.camera_transform();
+    scene.splatting_args.camera.position = Point3::new(p.x, p.y, p.z);
+    scene.splatting_args.camera.rotation = r;
+    let aabb = scene.pc.bbox();
+    scene.splatting_args.camera.fit_near_far(aabb);
+    scene.splatting_args.camera.projection.znear = 0.1;
 }
 
 enum Phase {
@@ -81,41 +82,31 @@ async fn main() {
         Window::default_attributes().with_inner_size(LogicalSize::new(1280,720)).with_title("MindCloud World Fly"),
     ).unwrap());
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let surface = instance.create_surface(window.clone()).unwrap();
-    let wgpu_ctx = WGPUContext::new(&instance, Some(&surface)).await;
-    let surface_caps = surface.get_capabilities(&wgpu_ctx.adapter);
-    let surface_format = *surface_caps.formats.iter().find(|f| f.is_srgb()).unwrap_or(&surface_caps.formats[0]);
-    let size = window.inner_size();
-    let mut surf_cfg = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: surface_format,
-        width: size.width.max(1), height: size.height.max(1), desired_maximum_frame_latency: 2,
-        present_mode: if opt.no_vsync {wgpu::PresentMode::AutoNoVsync} else {wgpu::PresentMode::AutoVsync},
-        alpha_mode: wgpu::CompositeAlphaMode::Auto, view_formats: vec![] };
-    surface.configure(&wgpu_ctx.device, &surf_cfg);
+    // Single AppGpu for entire app lifetime (menu + game share same GPU context)
+    let mut gpu = AppGpu::new(window.clone(), opt.no_vsync).await;
 
+    // Standalone egui for menu screens (uses same device)
     let egui_ctx = egui::Context::default();
     let mut egui_st = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &*window, None, None, None);
-    let mut egui_rn = egui_wgpu::Renderer::new(&wgpu_ctx.device, surface_format, egui_wgpu::RendererOptions::default());
+    let mut egui_rn = egui_wgpu::Renderer::new(gpu.device(), gpu.config.format, egui_wgpu::RendererOptions::default());
 
     let mut phase = if let Some(ref p) = opt.input {
-        let m = if opt.split {GameMode::SplitScreen} else {GameMode::SinglePlayer};
-        Phase::Loading { path: p.clone(), mode: m }
+        Phase::Loading { path: p.clone(), mode: if opt.split {GameMode::SplitScreen} else {GameMode::SinglePlayer} }
     } else {
         Phase::ModeSelect
     };
 
-    let mut game_state: Option<WindowContext> = None;
+    let mut scene: Option<SceneState> = None;
     let mut last_time = Instant::now();
     let no_vsync = opt.no_vsync;
     let mut show_exit_dialog = false;
-    let mut want_restart = false;
 
     #[allow(deprecated)]
     event_loop.run(move |event, target| {
+        // Forward events to appropriate egui
         if let Event::WindowEvent { ref event, .. } = event {
-            if let Some(ref mut gs) = game_state {
-                if gs.ui_renderer.on_event(&gs.window, event) { return; }
+            if scene.is_some() {
+                if gpu.egui.on_event(&gpu.window, event) { return; }
             } else {
                 let _ = egui_st.on_window_event(&*window, event);
             }
@@ -125,15 +116,11 @@ async fn main() {
             Event::NewEvents(winit::event::StartCause::ResumeTimeReached{..}) => { window.request_redraw(); }
             Event::WindowEvent { ref event, window_id } if window_id == window.id() => {
                 match event {
-                    WindowEvent::CloseRequested => {
-                        // Show confirmation instead of immediate exit
-                        show_exit_dialog = true;
-                        window.request_redraw();
-                    }
+                    WindowEvent::CloseRequested => { show_exit_dialog = true; window.request_redraw(); }
                     WindowEvent::Resized(ns) => {
                         if ns.width > 0 && ns.height > 0 {
-                            if let Some(ref mut gs) = game_state { gs.resize(*ns, None); }
-                            else { surf_cfg.width=ns.width; surf_cfg.height=ns.height; surface.configure(&wgpu_ctx.device, &surf_cfg); }
+                            gpu.resize(ns.width, ns.height);
+                            if let Some(ref mut sc) = scene { sc.resize(gpu.device(), ns.width, ns.height); }
                         }
                     }
                     WindowEvent::KeyboardInput { event: ke, .. } => {
@@ -141,36 +128,26 @@ async fn main() {
                             let pressed = ke.state == ElementState::Pressed;
                             let released = ke.state == ElementState::Released;
 
-                            // Esc: if dialog open → close it; otherwise open exit dialog
+                            // Esc: close dialog or open exit dialog
                             if key == KeyCode::Escape && released {
-                                if show_exit_dialog {
-                                    show_exit_dialog = false;
-                                } else if let Phase::Playing { ref mut settings_open, .. } = phase {
-                                    if *settings_open {
-                                        *settings_open = false;
-                                    } else {
-                                        show_exit_dialog = true;
-                                    }
-                                } else {
-                                    show_exit_dialog = true;
-                                }
+                                if show_exit_dialog { show_exit_dialog = false; }
+                                else if let Phase::Playing { ref mut settings_open, .. } = phase {
+                                    if *settings_open { *settings_open = false; }
+                                    else { show_exit_dialog = true; }
+                                } else { show_exit_dialog = true; }
                             }
 
                             if let Phase::Playing { ref mut keys1, ref mut keys2, ref mut armed1, ref mut armed2,
                                 ref mut drone_mode, ref mut drone1, ref mut drone2, ref mut settings_open, split, .. } = phase {
                                 if key == KeyCode::F1 && released { *settings_open = !*settings_open; }
-                                // M: toggle flight mode (per-player in split, shared in single)
-                                if key == KeyCode::KeyM && released {
-                                    if !split { *drone_mode = !*drone_mode;
-                                        if *drone_mode { drone1.reset(0.,0.,0.); *armed1=true; } else { *armed1=false; } }
+                                if key == KeyCode::KeyM && released && !split {
+                                    *drone_mode = !*drone_mode;
+                                    if *drone_mode { drone1.reset(0.,0.,0.); *armed1=true; } else { *armed1=false; }
                                 }
-                                // N: toggle P2 flight mode in split
                                 if key == KeyCode::KeyN && released && split {
-                                    // Switch P2 between FPV and Drone mode
-                                    use crate::drone::FlightMode;
                                     drone2.flight_mode = match drone2.flight_mode {
-                                        FlightMode::Fpv => FlightMode::Drone,
-                                        FlightMode::Drone => FlightMode::Fpv,
+                                        drone::FlightMode::Fpv => drone::FlightMode::Drone,
+                                        drone::FlightMode::Drone => drone::FlightMode::Fpv,
                                     };
                                 }
                                 if *drone_mode {
@@ -199,67 +176,48 @@ async fn main() {
                         }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
-                        if let Some(ref mut gs) = game_state {
-                            if let Phase::Playing{drone_mode,..} = &phase { if !drone_mode { match delta {
-                                winit::event::MouseScrollDelta::LineDelta(_,dy)=>gs.controller.process_scroll(*dy),
-                                winit::event::MouseScrollDelta::PixelDelta(p)=>gs.controller.process_scroll(p.y as f32/100.),
-                            }}}
-                        }
-                    }
-                    WindowEvent::MouseInput { state:bs, button, .. } => {
-                        if let Some(ref mut gs) = game_state {
-                            if let Phase::Playing{drone_mode,..} = &phase { if !drone_mode { match button {
-                                winit::event::MouseButton::Left=>gs.controller.left_mouse_pressed=*bs==ElementState::Pressed,
-                                winit::event::MouseButton::Right=>gs.controller.right_mouse_pressed=*bs==ElementState::Pressed,
-                                _=>{}
-                            }}}
-                        }
+                        // Only orbit mode uses scroll
                     }
                     WindowEvent::RedrawRequested => {
                         let now = Instant::now(); let dt = now-last_time; last_time=now; let dt_s=dt.as_secs_f32();
+                        gpu.fps = (1./dt_s)*0.05 + gpu.fps*0.95;
 
                         match &mut phase {
                             Phase::ModeSelect | Phase::SceneSelect{..} => {
                                 target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(16)));
                                 let raw = egui_st.take_egui_input(&*window);
                                 egui_ctx.begin_pass(raw);
-
                                 let transition = match &phase {
                                     Phase::ModeSelect => menu_ui::draw_mode_select(&egui_ctx),
                                     Phase::SceneSelect{mode, scene_files} => menu_ui::draw_scene_select(&egui_ctx, scene_files, *mode),
                                     _ => StateTransition::None,
                                 };
-
-                                // Exit confirmation dialog (drawn on top)
                                 match menu_ui::draw_exit_confirm(&egui_ctx, &mut show_exit_dialog, false) {
                                     menu_ui::ExitAction::Quit => { target.exit(); return; }
                                     _ => {}
                                 }
-
                                 let output = egui_ctx.end_pass();
                                 egui_st.handle_platform_output(&*window, output.platform_output.clone());
 
-                                if let wgpu::CurrentSurfaceTexture::Success(frame)|wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture() {
+                                // Render menu egui
+                                if let wgpu::CurrentSurfaceTexture::Success(frame)|wgpu::CurrentSurfaceTexture::Suboptimal(frame) = gpu.surface.get_current_texture() {
                                     let view = frame.texture.create_view(&Default::default());
-                                    let mut enc = wgpu_ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor{label:None});
-                                    let screen = egui_wgpu::ScreenDescriptor{size_in_pixels:[surf_cfg.width,surf_cfg.height],pixels_per_point:window.scale_factor() as f32};
+                                    let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:None});
+                                    let screen = egui_wgpu::ScreenDescriptor{size_in_pixels:[gpu.config.width,gpu.config.height],pixels_per_point:window.scale_factor() as f32};
                                     let tris = egui_ctx.tessellate(output.shapes, output.pixels_per_point);
-                                    for(id,d) in &output.textures_delta.set { egui_rn.update_texture(&wgpu_ctx.device,&wgpu_ctx.queue,*id,d); }
-                                    egui_rn.update_buffers(&wgpu_ctx.device,&wgpu_ctx.queue,&mut enc,&tris,&screen);
+                                    for(id,d) in &output.textures_delta.set { egui_rn.update_texture(gpu.device(),gpu.queue(),*id,d); }
+                                    egui_rn.update_buffers(gpu.device(),gpu.queue(),&mut enc,&tris,&screen);
                                     let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:None,
                                         color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view,resolve_target:None,
                                             ops:wgpu::Operations{load:wgpu::LoadOp::Clear(wgpu::Color{r:0.05,g:0.07,b:0.11,a:1.0}),store:wgpu::StoreOp::Store},depth_slice:None})],
                                         ..Default::default()}).forget_lifetime();
                                     egui_rn.render(&mut rp, &tris, &screen); drop(rp);
                                     for id in &output.textures_delta.free { egui_rn.free_texture(id); }
-                                    wgpu_ctx.queue.submit([enc.finish()]); frame.present();
+                                    gpu.queue().submit([enc.finish()]); frame.present();
                                 }
-
                                 match transition {
                                     StateTransition::ToModeSelect => { phase = Phase::ModeSelect; }
-                                    StateTransition::ToSceneSelect(mode) => {
-                                        phase = Phase::SceneSelect { mode, scene_files: menu_ui::scan_scene_files() };
-                                    }
+                                    StateTransition::ToSceneSelect(mode) => { phase = Phase::SceneSelect{mode, scene_files: menu_ui::scan_scene_files()}; }
                                     StateTransition::ToLoading(path, mode) => { phase = Phase::Loading{path, mode}; }
                                     _ => {}
                                 }
@@ -269,16 +227,20 @@ async fn main() {
                                 let mode = *mode; let split = mode == GameMode::SplitScreen;
                                 let p = path.clone();
                                 window.set_title("MindCloud Fly - Loading...");
-                                if split { let _ = window.request_inner_size(LogicalSize::new(1280u32,960)); }
+                                if split { let _ = window.request_inner_size(LogicalSize::new(1280u32, 960)); }
+
                                 let f = File::open(&p).unwrap_or_else(|e|{eprintln!("Failed: {:?}: {}",p,e);std::process::exit(1);});
-                                let rcfg = RenderConfig{no_vsync, hdr:false};
-                                let gs = pollster::block_on(WindowContext::new_from_arc(window.clone(),f,&rcfg)).unwrap();
-                                let mut gs = gs; gs.pointcloud_file_path=Some(p); gs.ui_visible=!split;
+                                let mut sc = pollster::block_on(SceneState::load(&gpu, f, false)).unwrap();
+                                sc.pointcloud_file_path = Some(p);
+                                // Resize scene to match current window
+                                let s = window.inner_size();
+                                sc.resize(gpu.device(), s.width.max(1), s.height.max(1));
+                                scene = Some(sc);
+
                                 let mut d1=Drone::new(); d1.reset(0.,2.,0.);
                                 let mut d2=Drone::new(); d2.reset(2.,2.,0.);
                                 let(mut a1,mut a2,mut dm)=(false,false,!split);
                                 if split{dm=true;a1=true;a2=true;}
-                                game_state=Some(gs);
                                 phase=Phase::Playing{drone1:d1,drone2:d2,keys1:KeyState::default(),keys2:KeyStateP2::default(),
                                     armed1:a1,armed2:a2,drone_mode:dm,split,settings_open:false,controller1:input::Controller::new()};
                                 window.set_title(if split{"MindCloud Fly [SPLIT]"}else{"MindCloud World Fly"});
@@ -288,121 +250,145 @@ async fn main() {
                                 ref mut armed1,ref mut armed2,ref mut drone_mode,split,
                                 ref mut settings_open,ref mut controller1} =>
                             {
-                                let gs = game_state.as_mut().unwrap();
-                                gs.fps = (1./dt_s)*0.05 + gs.fps*0.95;
+                                let sc = scene.as_mut().unwrap();
                                 let split = *split;
+                                let paused = *settings_open || show_exit_dialog;
                                 if !no_vsync { target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(1))); }
 
-                                // Pause game when any dialog is open
-                                let paused = *settings_open || show_exit_dialog;
-
                                 if split {
-                                    // Only update physics when not paused
                                     if !paused {
                                         let i1=keys1.to_input(*armed1); drone1.update(dt_s,&i1);
                                         let i2=keys2.to_input(*armed2); drone2.update(dt_s,&i2);
                                     }
-                                    if gs.splatting_args.walltime<Duration::from_secs(5){gs.splatting_args.walltime+=dt;}
-                                    let mut at=gs.splatting_args;
+                                    if sc.splatting_args.walltime<Duration::from_secs(5){sc.splatting_args.walltime+=dt;}
+                                    // Camera args
+                                    let mut at=sc.splatting_args;
                                     {let(p,r)=drone1.camera_transform();at.camera.position=Point3::new(p.x,p.y,p.z);at.camera.rotation=r;
-                                     at.camera.projection.resize(gs.config.width,gs.config.height/2);let a=gs.pc.bbox();at.camera.fit_near_far(a);at.camera.projection.znear=0.1;}
-                                    let mut ab=gs.splatting_args;
+                                     at.camera.projection.resize(gpu.config.width,gpu.config.height/2);
+                                     let a=sc.pc.bbox();at.camera.fit_near_far(a);at.camera.projection.znear=0.1;}
+                                    let mut ab=sc.splatting_args;
                                     {let(p,r)=drone2.camera_transform();ab.camera.position=Point3::new(p.x,p.y,p.z);ab.camera.rotation=r;
-                                     ab.camera.projection.resize(gs.config.width,gs.config.height/2);let a=gs.pc.bbox();ab.camera.fit_near_far(a);ab.camera.projection.znear=0.1;}
-                                    gs.ui_renderer.begin_frame(&gs.window);
-                                    {let ctx=gs.ui_renderer.winit.egui_ctx().clone();
-                                     // Always draw HUD
+                                     ab.camera.projection.resize(gpu.config.width,gpu.config.height/2);
+                                     let a=sc.pc.bbox();ab.camera.fit_near_far(a);ab.camera.projection.znear=0.1;}
+
+                                    // Render splats (returns surface texture without presenting)
+                                    let surface_tex = match sc.render_split(&gpu, at, ab) {
+                                        Ok(tex) => tex,
+                                        Err(_) => { gpu.resize(window.inner_size().width, window.inner_size().height); window.request_redraw(); return; }
+                                    };
+
+                                    // egui overlay (HUD + dialogs) on top of splat render
+                                    gpu.egui.begin_frame(&gpu.window);
+                                    {let ctx=gpu.egui.winit.egui_ctx().clone();
                                      let s=ctx.screen_rect();let hh=s.height()/2.;let w=s.width();
-                                     hud::draw_hud(&ctx,drone1,None,*armed1,gs.fps,Some("P1"),Some(egui::Rect::from_min_size(s.min,egui::Vec2::new(w,hh))));
-                                     hud::draw_hud(&ctx,drone2,None,*armed2,gs.fps,Some("P2"),Some(egui::Rect::from_min_size(egui::Pos2::new(s.min.x,s.min.y+hh),egui::Vec2::new(w,hh))));
-                                     // Dark overlay on top of HUD when paused
+                                     hud::draw_hud(&ctx,drone1,None,*armed1,gpu.fps,Some("P1"),Some(egui::Rect::from_min_size(s.min,egui::Vec2::new(w,hh))));
+                                     hud::draw_hud(&ctx,drone2,None,*armed2,gpu.fps,Some("P2"),Some(egui::Rect::from_min_size(egui::Pos2::new(s.min.x,s.min.y+hh),egui::Vec2::new(w,hh))));
                                      if paused {
-                                         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pause_dim")));
-                                         painter.rect_filled(s, 0.0, Color32::from_black_alpha(230));
+                                         let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("dim")));
+                                         painter.rect_filled(s,0.0,Color32::from_black_alpha(230));
                                      }
-                                     // Dialogs on top of overlay
                                      settings::draw_settings(&ctx,settings_open,drone1,controller1,armed1);
-                                     match menu_ui::draw_exit_confirm(&ctx, &mut show_exit_dialog, true) {
-                                         menu_ui::ExitAction::Quit => { target.exit(); return; }
+                                     match menu_ui::draw_exit_confirm(&ctx,&mut show_exit_dialog,true) {
+                                         menu_ui::ExitAction::Quit => {target.exit();return;}
                                          menu_ui::ExitAction::BackToMenu => {
                                              show_exit_dialog = false;
-                                             want_restart = true;
+                                             scene = None; // drop scene, deferred phase change below
                                          }
                                          _ => {}
                                      }}
-                                    let eo=gs.ui_renderer.end_frame(&gs.window);
-                                    match gs.render_split(at,ab,Some(eo)){Ok(_)=>{}Err(_)=>gs.resize(gs.window.inner_size(),None)}
-                                    gs.window.set_title(&format!("MindCloud Fly [SPLIT] - {:.0} FPS | P1:{} P2:{}{}",gs.fps,
+                                    let egui_output = gpu.egui.end_frame(&gpu.window);
+
+                                    // Render egui onto the surface texture
+                                    {
+                                        let view_srgb = surface_tex.texture.create_view(&Default::default());
+                                        let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("egui split")});
+                                        let screen = egui_wgpu::ScreenDescriptor{
+                                            size_in_pixels:[gpu.config.width, gpu.config.height],
+                                            pixels_per_point: gpu.window.scale_factor() as f32,
+                                        };
+                                        let ctx = gpu.egui.winit.egui_ctx().clone();
+                                        let tris = ctx.tessellate(egui_output.shapes, egui_output.pixels_per_point);
+                                        let device = &gpu.wgpu_ctx.device;
+                                        let queue = &gpu.wgpu_ctx.queue;
+                                        for (id,d) in &egui_output.textures_delta.set { gpu.egui.renderer.update_texture(device,queue,*id,d); }
+                                        gpu.egui.renderer.update_buffers(device,queue,&mut enc,&tris,&screen);
+                                        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:Some("egui"),
+                                            color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view_srgb,resolve_target:None,
+                                                ops:wgpu::Operations{load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store},depth_slice:None})],
+                                            ..Default::default()}).forget_lifetime();
+                                        gpu.egui.renderer.render(&mut rp, &tris, &screen);
+                                        drop(rp);
+                                        for id in &egui_output.textures_delta.free { gpu.egui.renderer.free_texture(id); }
+                                        gpu.queue().submit([enc.finish()]);
+                                    }
+                                    surface_tex.present();
+
+                                    gpu.window.set_title(&format!("MindCloud Fly [SPLIT] - {:.0} FPS | P1:{} P2:{}{}",gpu.fps,
                                         if *armed1{"ARM"}else{"OFF"},if *armed2{"ARM"}else{"OFF"},if paused{" [PAUSED]"}else{""}));
                                 } else if *drone_mode {
                                     if !paused { let i1=keys1.to_input(*armed1); drone1.update(dt_s,&i1); }
-                                    apply_drone_cam(gs,drone1,dt);
-                                    gs.ui_renderer.begin_frame(&gs.window);
-                                    {let ctx=gs.ui_renderer.winit.egui_ctx().clone();
-                                     hud::draw_hud(&ctx,drone1,None,*armed1,gs.fps,None,None);
+                                    apply_drone_cam(sc, drone1, dt);
+                                    sc.splatting_args.camera.projection.resize(gpu.config.width, gpu.config.height);
+                                    let surface_tex = match sc.render(&gpu, None) {
+                                        Ok(t) => t, Err(_) => { gpu.resize(window.inner_size().width, window.inner_size().height); window.request_redraw(); return; }
+                                    };
+                                    // egui HUD + dialogs
+                                    gpu.egui.begin_frame(&gpu.window);
+                                    {let ctx=gpu.egui.winit.egui_ctx().clone();
+                                     hud::draw_hud(&ctx,drone1,None,*armed1,gpu.fps,None,None);
                                      if paused {
-                                         let s = ctx.screen_rect();
-                                         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pause_dim")));
-                                         painter.rect_filled(s, 0.0, Color32::from_black_alpha(230));
+                                         let s=ctx.screen_rect();
+                                         let painter=ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground,egui::Id::new("dim")));
+                                         painter.rect_filled(s,0.0,Color32::from_black_alpha(230));
                                      }
                                      settings::draw_settings(&ctx,settings_open,drone1,controller1,armed1);
-                                     match menu_ui::draw_exit_confirm(&ctx, &mut show_exit_dialog, true) {
-                                         menu_ui::ExitAction::Quit => { target.exit(); return; }
-                                         menu_ui::ExitAction::BackToMenu => {
-                                             show_exit_dialog = false;
-                                             want_restart = true;
-                                         }
+                                     match menu_ui::draw_exit_confirm(&ctx,&mut show_exit_dialog,true) {
+                                         menu_ui::ExitAction::Quit => {target.exit();return;}
+                                         menu_ui::ExitAction::BackToMenu => { show_exit_dialog=false; scene=None; }
                                          _ => {}
                                      }}
-                                    let eo=gs.ui_renderer.end_frame(&gs.window);
-                                    match gs.render(true,Some(eo)){Ok(_)=>{}Err(_)=>gs.resize(gs.window.inner_size(),None)}
-                                    gs.window.set_title(&format!("MindCloud Fly [DRONE] - {:.0} FPS | Armed: {}{}",gs.fps,armed1,if paused{" [PAUSED]"}else{""}));
+                                    let eo=gpu.egui.end_frame(&gpu.window);
+                                    {let view_srgb=surface_tex.texture.create_view(&Default::default());
+                                     let mut enc=gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("egui")});
+                                     let screen=egui_wgpu::ScreenDescriptor{size_in_pixels:[gpu.config.width,gpu.config.height],pixels_per_point:gpu.window.scale_factor() as f32};
+                                     let ctx=gpu.egui.winit.egui_ctx().clone();
+                                     let tris=ctx.tessellate(eo.shapes,eo.pixels_per_point);
+                                     let device=&gpu.wgpu_ctx.device;let queue=&gpu.wgpu_ctx.queue;
+                                     for(id,d) in &eo.textures_delta.set{gpu.egui.renderer.update_texture(device,queue,*id,d);}
+                                     gpu.egui.renderer.update_buffers(device,queue,&mut enc,&tris,&screen);
+                                     let mut rp=enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:None,
+                                         color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view_srgb,resolve_target:None,
+                                             ops:wgpu::Operations{load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store},depth_slice:None})],
+                                         ..Default::default()}).forget_lifetime();
+                                     gpu.egui.renderer.render(&mut rp,&tris,&screen);drop(rp);
+                                     for id in &eo.textures_delta.free{gpu.egui.renderer.free_texture(id);}
+                                     queue.submit([enc.finish()]);}
+                                    surface_tex.present();
+                                    gpu.window.set_title(&format!("MindCloud Fly [DRONE] - {:.0} FPS | Armed: {}{}",gpu.fps,armed1,if paused{" [PAUSED]"}else{""}));
                                 } else {
-                                    if !paused { gs.update(dt); }
-                                    gs.ui_renderer.begin_frame(&gs.window);
-                                    {let ctx=gs.ui_renderer.winit.egui_ctx().clone();
-                                     if paused {
-                                         let s = ctx.screen_rect();
-                                         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pause_dim")));
-                                         painter.rect_filled(s, 0.0, Color32::from_black_alpha(230));
-                                     }
-                                     settings::draw_settings(&ctx,settings_open,drone1,controller1,armed1);
-                                     match menu_ui::draw_exit_confirm(&ctx, &mut show_exit_dialog, true) {
-                                         menu_ui::ExitAction::Quit => { target.exit(); return; }
-                                         menu_ui::ExitAction::BackToMenu => {
-                                             show_exit_dialog = false;
-                                             want_restart = true;
-                                         }
-                                         _ => {}
-                                     }}
-                                    let eo=gs.ui_renderer.end_frame(&gs.window);
-                                    match gs.render(true,Some(eo)){Ok(_)=>{}Err(_)=>gs.resize(gs.window.inner_size(),None)}
-                                    gs.window.set_title(&format!("MindCloud Fly [ORBIT] - {:.0} FPS{}",gs.fps,if paused{" [PAUSED]"}else{""}));
+                                    // Orbit mode
+                                    if !paused { sc.splatting_args.walltime += dt; }
+                                    let surface_tex = match sc.render(&gpu, None) {
+                                        Ok(t) => t, Err(_) => { gpu.resize(window.inner_size().width, window.inner_size().height); window.request_redraw(); return; }
+                                    };
+                                    surface_tex.present();
+                                    gpu.window.set_title(&format!("MindCloud Fly [ORBIT] - {:.0} FPS{}",gpu.fps,if paused{" [PAUSED]"}else{""}));
                                 }
-                                if no_vsync{gs.window.request_redraw();}else{window.request_redraw();}
-
-                                // Handle deferred restart (after frame is fully rendered)
-                                if want_restart {
-                                    want_restart = false;
-                                    game_state = None;
-                                    let exe = std::env::current_exe().unwrap();
-                                    let _ = std::process::Command::new(&exe)
-                                        .envs(std::env::vars())
-                                        .spawn();
-                                    target.exit();
-                                }
+                                if no_vsync{window.request_redraw();}else{window.request_redraw();}
                             }
+                        }
+                        // Deferred: if scene was dropped during Playing (BackToMenu), reset phase
+                        if matches!(phase, Phase::Playing{..}) && scene.is_none() {
+                            phase = Phase::ModeSelect;
+                            window.set_title("MindCloud World Fly");
+                            // Keep current window size — menu adapts to any size
                         }
                     }
                     _ => {}
                 }
             }
             Event::DeviceEvent{event:DeviceEvent::MouseMotion{delta},..} => {
-                if let Some(ref mut gs) = game_state {
-                    if let Phase::Playing{drone_mode,..} = &phase {
-                        if !drone_mode { gs.controller.process_mouse(delta.0 as f32, delta.1 as f32); }
-                    }
-                }
+                // Orbit camera mouse — not using SceneState controller for now
             }
             _ => {}
         }

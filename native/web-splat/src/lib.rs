@@ -748,6 +748,261 @@ pub fn smoothstep(x: f32) -> f32 {
     return x * x * (3.0 - 2.0 * x);
 }
 
+// ============================================================================
+// Refactored architecture: AppGpu (long-lived) + SceneState (replaceable)
+// ============================================================================
+
+/// Long-lived GPU context that persists across scene loads and menu transitions.
+pub struct AppGpu {
+    pub wgpu_ctx: WGPUContext,
+    pub surface: wgpu::Surface<'static>,
+    pub config: wgpu::SurfaceConfiguration,
+    pub window: Arc<Window>,
+    pub scale_factor: f32,
+    pub egui: ui_renderer::EguiWGPU,
+    pub fps: f32,
+}
+
+impl AppGpu {
+    /// Create the GPU context attached to a window (call once at app start).
+    pub async fn new(window: Arc<Window>, no_vsync: bool) -> Self {
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        );
+        let surface = instance.create_surface(window.clone()).unwrap();
+        let wgpu_ctx = WGPUContext::new(&instance, Some(&surface)).await;
+
+        let surface_caps = surface.get_capabilities(&wgpu_ctx.adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .cloned()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let size = window.inner_size();
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            desired_maximum_frame_latency: 2,
+            present_mode: if no_vsync {
+                wgpu::PresentMode::AutoNoVsync
+            } else {
+                wgpu::PresentMode::AutoVsync
+            },
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![surface_format.remove_srgb_suffix()],
+        };
+        surface.configure(&wgpu_ctx.device, &config);
+
+        let egui = ui_renderer::EguiWGPU::new(&wgpu_ctx.device, surface_format, &window);
+
+        Self { wgpu_ctx, surface, config, window, scale_factor: 1.0, egui, fps: 0.0 }
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.wgpu_ctx.device, &self.config);
+        }
+    }
+
+    pub fn device(&self) -> &wgpu::Device { &self.wgpu_ctx.device }
+    pub fn queue(&self) -> &wgpu::Queue { &self.wgpu_ctx.queue }
+}
+
+/// Scene-specific state: loaded point cloud + renderer. Can be dropped and recreated.
+pub struct SceneState {
+    pub pc: PointCloud,
+    pub renderer: GaussianRenderer,
+    pub display: renderer::Display,
+    pub splatting_args: SplattingArgs,
+    pub stopwatch: Option<GPUStopwatch>,
+    pub pointcloud_file_path: Option<PathBuf>,
+}
+
+impl SceneState {
+    /// Load a scene from a file. Uses the AppGpu's device/queue.
+    pub async fn load<R: Read + Seek>(gpu: &AppGpu, pc_file: R, hdr: bool) -> anyhow::Result<Self> {
+        let device = gpu.device();
+        let queue = gpu.queue();
+
+        let render_format = if hdr {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+
+        let pc_raw = io::GenericGaussianPointCloud::load(pc_file)?;
+        let pc = PointCloud::new(device, pc_raw)?;
+        log::info!("loaded point cloud with {} points", pc.num_points());
+
+        let renderer = GaussianRenderer::new(device, queue, render_format, pc.sh_deg(), pc.compressed()).await;
+
+        let display = renderer::Display::new(
+            device,
+            render_format,
+            gpu.config.format.remove_srgb_suffix(),
+            gpu.config.width,
+            gpu.config.height,
+        );
+
+        let aabb = pc.bbox();
+        let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
+        let view_camera = PerspectiveCamera::new(
+            aabb.center() - Vector3::new(1., 1., 1.) * aabb.radius() * 0.5,
+            Quaternion::one(),
+            PerspectiveProjection::new(
+                Vector2::new(gpu.config.width, gpu.config.height),
+                Vector2::new(Deg(45.), Deg(45. / aspect)),
+                0.01,
+                1000.,
+            ),
+        );
+
+        // Don't use stopwatch in SceneState — it causes conflicts on reload
+        let stopwatch = None;
+
+        Ok(Self {
+            pc,
+            renderer,
+            display,
+            splatting_args: SplattingArgs {
+                camera: view_camera,
+                viewport: Vector2::new(gpu.config.width, gpu.config.height),
+                gaussian_scaling: 1.,
+                max_sh_deg: 3,
+                mip_splatting: None,
+                kernel_size: None,
+                clipping_box: None,
+                walltime: Duration::ZERO,
+                scene_center: None,
+                scene_extend: None,
+                background_color: wgpu::Color::BLACK,
+            },
+            stopwatch,
+            pointcloud_file_path: None,
+        })
+    }
+
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.display.resize(device, width, height);
+        self.splatting_args.viewport = Vector2::new(width, height);
+        self.splatting_args.camera.projection.resize(width, height);
+    }
+
+    /// Render the scene (single viewport). Returns SurfaceTexture for caller to render egui + present.
+    pub fn render(
+        &mut self,
+        gpu: &AppGpu,
+        egui_output: Option<egui::FullOutput>,
+    ) -> Result<wgpu::SurfaceTexture, wgpu::CurrentSurfaceTexture> {
+        let output = match gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            err => return Err(err),
+        };
+        let view_rgb = output.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(gpu.config.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
+
+        let mut encoder = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("scene render"),
+        });
+
+        self.renderer.prepare(
+            &mut encoder, gpu.device(), gpu.queue(), &self.pc, self.splatting_args, &mut self.stopwatch,
+        );
+
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("splat rp"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.display.texture(), resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+            self.renderer.render(&mut rp, &self.pc);
+        }
+
+        self.display.render(
+            &mut encoder, &view_rgb, self.splatting_args.background_color,
+            self.renderer.camera(), &self.renderer.render_settings(),
+        );
+
+        // Note: egui overlay is handled externally by the caller (main.rs)
+        let _ = egui_output;
+
+        gpu.wgpu_ctx.queue.submit([encoder.finish()]);
+        // Don't present — caller renders egui on top then presents
+        Ok(output)
+    }
+
+    /// Render split-screen (two cameras, top/bottom).
+    /// Returns the SurfaceTexture so caller can render egui on top before presenting.
+    pub fn render_split(
+        &mut self,
+        gpu: &AppGpu,
+        args_top: SplattingArgs,
+        args_bottom: SplattingArgs,
+    ) -> Result<wgpu::SurfaceTexture, wgpu::CurrentSurfaceTexture> {
+        let output = match gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            err => return Err(err),
+        };
+        let view_rgb = output.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(gpu.config.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
+
+        let w = gpu.config.width as f32;
+        let half_h = gpu.config.height as f32 / 2.0;
+
+        for (pass_idx, args) in [args_top, args_bottom].iter().enumerate() {
+            let mut args = *args;
+            args.viewport = Vector2::new(gpu.config.width, (half_h as u32).max(1));
+
+            let mut encoder = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(if pass_idx == 0 { "split top" } else { "split bottom" }),
+            });
+
+            self.renderer.prepare(
+                &mut encoder, gpu.device(), gpu.queue(), &self.pc, args, &mut None,
+            );
+
+            {
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("splat split"), color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: self.display.texture(), resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                        depth_slice: None })], ..Default::default()
+                });
+                self.renderer.render(&mut rp, &self.pc);
+            }
+
+            let y_offset = if pass_idx == 0 { 0.0 } else { half_h };
+            self.display.render_to_region(
+                &mut encoder, &view_rgb, args.background_color,
+                self.renderer.camera(), &self.renderer.render_settings(),
+                Some([0.0, y_offset, w, half_h]),
+                pass_idx == 0,
+            );
+
+            gpu.wgpu_ctx.queue.submit([encoder.finish()]);
+        }
+
+        // Don't present — caller will render egui overlay and then present
+        Ok(output)
+    }
+}
+
 pub async fn open_window<R: Read + Seek + Send + Sync + 'static>(
     file: R,
     scene_file: Option<R>,
