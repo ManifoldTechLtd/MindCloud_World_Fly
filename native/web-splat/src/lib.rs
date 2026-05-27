@@ -152,20 +152,35 @@ impl WindowContext {
         pc_file: R,
         render_config: &RenderConfig,
     ) -> anyhow::Result<Self> {
+        Self::new_from_arc(Arc::new(window), pc_file, render_config).await
+    }
+
+    /// Create from an existing Arc<Window> — creates new wgpu context.
+    pub async fn new_from_arc<R: Read + Seek>(
+        window: Arc<Window>,
+        pc_file: R,
+        render_config: &RenderConfig,
+    ) -> anyhow::Result<Self> {
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        );
+        let surface: wgpu::Surface = instance.create_surface(window.clone())?;
+        let wgpu_context = WGPUContext::new(&instance, Some(&surface)).await;
+        Self::new_with_gpu(window, wgpu_context, surface, pc_file, render_config).await
+    }
+
+    /// Create with an existing wgpu context + surface — for reusing GPU from menu phase.
+    pub async fn new_with_gpu<R: Read + Seek>(
+        window: Arc<Window>,
+        wgpu_context: WGPUContext,
+        surface: wgpu::Surface<'static>,
+        pc_file: R,
+        render_config: &RenderConfig,
+    ) -> anyhow::Result<Self> {
         let mut size = window.inner_size();
         if size == PhysicalSize::new(0, 0) {
             size = PhysicalSize::new(800, 600);
         }
-
-        let window = Arc::new(window);
-
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(window.clone_for_wgpu()),
-        );
-
-        let surface: wgpu::Surface = instance.create_surface(window.clone())?;
-
-        let wgpu_context = WGPUContext::new(&instance, Some(&surface)).await;
 
         let device = &wgpu_context.device;
         let queue = &wgpu_context.queue;
