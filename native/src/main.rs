@@ -97,6 +97,7 @@ async fn main() {
     };
 
     let mut scene: Option<SceneState> = None;
+    let mut hid_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>> = None;
     let mut last_time = Instant::now();
     let no_vsync = opt.no_vsync;
     let mut show_exit_dialog = false;
@@ -241,6 +242,22 @@ async fn main() {
                                 let mut d2=Drone::new(); d2.reset(2.,2.,0.);
                                 let(mut a1,mut a2,mut dm)=(false,false,!split);
                                 if split{dm=true;a1=true;a2=true;}
+
+                                // Auto-open HID controller if available
+                                if hid_rx.is_none() {
+                                    let devices = input::list_hid_devices();
+                                    log::info!("HID devices found: {}", devices.len());
+                                    for d in &devices { log::info!("  {} (VID:{:04X} PID:{:04X})", d.product_name, d.vendor_id, d.product_id); }
+                                    // Open first non-mouse/keyboard device (likely RC transmitter)
+                                    if let Some(rc) = devices.iter().find(|d| d.product_name.contains("SIM") || d.product_name.contains("RADIO") || d.product_name.contains("RC")) {
+                                        log::info!("Opening HID: {}", rc.product_name);
+                                        match input::open_hid_device(&rc.path) {
+                                            Ok(rx) => { hid_rx = Some(rx); log::info!("HID device opened successfully"); }
+                                            Err(e) => { log::warn!("Failed to open HID: {}", e); }
+                                        }
+                                    }
+                                }
+
                                 phase=Phase::Playing{drone1:d1,drone2:d2,keys1:KeyState::default(),keys2:KeyStateP2::default(),
                                     armed1:a1,armed2:a2,drone_mode:dm,split,settings_open:false,controller1:input::Controller::new()};
                                 window.set_title(if split{"MindCloud Fly [SPLIT]"}else{"MindCloud World Fly"});
@@ -255,9 +272,24 @@ async fn main() {
                                 let paused = *settings_open || show_exit_dialog;
                                 if !no_vsync { target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(1))); }
 
+                                // Poll HID controller data (always, even when paused — needed for listen mode)
+                                if let Some(ref rx) = hid_rx {
+                                    while let Ok(data) = rx.try_recv() {
+                                        controller1.feed_hid_report(&data);
+                                    }
+                                }
+                                // Always poll listen mode (channel mapping works while settings open)
+                                controller1.poll_listen();
+
                                 if split {
                                     if !paused {
-                                        let i1=keys1.to_input(*armed1); drone1.update(dt_s,&i1);
+                                        // P1: use HID controller if connected, else keyboard
+                                        let i1 = if controller1.hid_connected {
+                                            controller1.armed = *armed1;
+                                            controller1.update()
+                                        } else { keys1.to_input(*armed1) };
+                                        *armed1 = i1.armed;
+                                        drone1.update(dt_s, &i1);
                                         let i2=keys2.to_input(*armed2); drone2.update(dt_s,&i2);
                                     }
                                     if sc.splatting_args.walltime<Duration::from_secs(5){sc.splatting_args.walltime+=dt;}
@@ -326,7 +358,13 @@ async fn main() {
                                     gpu.window.set_title(&format!("MindCloud Fly [SPLIT] - {:.0} FPS | P1:{} P2:{}{}",gpu.fps,
                                         if *armed1{"ARM"}else{"OFF"},if *armed2{"ARM"}else{"OFF"},if paused{" [PAUSED]"}else{""}));
                                 } else if *drone_mode {
-                                    if !paused { let i1=keys1.to_input(*armed1); drone1.update(dt_s,&i1); }
+                                    if !paused {
+                                        let i1 = if controller1.hid_connected {
+                                            controller1.armed = *armed1; controller1.update()
+                                        } else { keys1.to_input(*armed1) };
+                                        *armed1 = i1.armed;
+                                        drone1.update(dt_s, &i1);
+                                    }
                                     apply_drone_cam(sc, drone1, dt);
                                     sc.splatting_args.camera.projection.resize(gpu.config.width, gpu.config.height);
                                     let surface_tex = match sc.render(&gpu, None) {

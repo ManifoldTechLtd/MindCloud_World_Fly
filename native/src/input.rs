@@ -71,10 +71,12 @@ impl Default for ChannelCalibration {
 }
 
 impl ChannelCalibration {
+    /// Apply calibration: center = (min+max)/2, output -1..1
     pub fn apply(&self, raw: u16) -> f32 {
-        match (self.min, self.center, self.max) {
-            (Some(min), Some(center), Some(max)) => {
-                let center = center as f32;
+        match (self.min, self.max) {
+            (Some(min), Some(max)) if max > min => {
+                // Center is midpoint (same as JS version)
+                let center = (min as f32 + max as f32) / 2.0;
                 let span = if raw as f32 >= center {
                     (max as f32 - center).max(1.0)
                 } else {
@@ -83,27 +85,37 @@ impl ChannelCalibration {
                 clamp((raw as f32 - center) / span, -1.0, 1.0)
             }
             _ => {
-                // No calibration: assume 0-2047 range, center 1024
-                clamp((raw as f32 - 1024.0) / 1024.0, -1.0, 1.0)
+                // No calibration: pass through raw as 0-2047 centered at 1024
+                clamp((raw as f32 - 1024.0) / 820.0, -1.0, 1.0)
             }
         }
+    }
+
+    pub fn is_calibrated(&self) -> bool {
+        self.min.is_some() && self.max.is_some()
     }
 }
 
 // ---- Controller ----
 
+/// Axis names for display
+pub const AXIS_NAMES: [&str; 4] = ["Roll", "Pitch", "Throttle", "Yaw"];
+/// Switch names for display
+pub const SWITCH_NAMES: [&str; 2] = ["Arm", "Mode"];
+
 pub struct Controller {
-    // Axis mappings: roll, pitch, throttle, yaw, cameraTilt
-    pub axis_map: [AxisMapping; 5],
-    pub button_map_arm: ButtonMapping,
-    pub button_map_mode: ButtonMapping,
+    /// Axis mappings: roll, pitch, throttle, yaw (indices 0-3)
+    pub axis_map: [AxisMapping; 4],
+    /// Switch channel mappings: arm (0), mode (1). Channel -1 = unassigned.
+    pub switch_channels: [i32; 2],
+    pub switch_inverted: [bool; 2],
+    pub switch_threshold: f32,
 
     // HID state
     pub hid_axes: [f32; MAX_CHANNELS],
-    hid_raw: [u16; MAX_CHANNELS],
+    pub hid_raw: [u16; MAX_CHANNELS],
     pub calibration: [ChannelCalibration; MAX_CHANNELS],
     pub hid_connected: bool,
-    pub hid_device_name: String,
 
     // Keyboard state
     keys_down: std::collections::HashSet<winit::keyboard::KeyCode>,
@@ -111,43 +123,83 @@ pub struct Controller {
     // Output
     pub armed: bool,
     pub boost: bool,
-    prev_arm_button: bool,
-    prev_mode_button: bool,
+    prev_arm_state: bool,
+    prev_mode_state: bool,
 
-    // Mode switch output (edge-detected)
     pub mode_switch_triggered: bool,
     pub reset_triggered: bool,
+
+    /// Calibration in progress
+    pub calibrating: bool,
+
+    /// Channel listen mode: Some(axis_or_switch_index) means waiting for user to move a stick
+    /// axis 0-3 = axis mapping, 10/11 = switch mapping
+    pub listening: Option<usize>,
+    listen_baseline: [f32; MAX_CHANNELS],
 }
 
 impl Controller {
     pub fn new() -> Self {
+        let mut calibration: [ChannelCalibration; MAX_CHANNELS] = std::array::from_fn(|_| ChannelCalibration::default());
+        crate::persistence::load_calibration(&mut calibration);
+
         Self {
             axis_map: [
                 AxisMapping { channel: 0, ..Default::default() },  // roll
                 AxisMapping { channel: 1, ..Default::default() },  // pitch
                 AxisMapping { channel: 2, ..Default::default() },  // throttle
                 AxisMapping { channel: 3, ..Default::default() },  // yaw
-                AxisMapping::default(),                             // cameraTilt
             ],
-            button_map_arm: ButtonMapping::default(),
-            button_map_mode: ButtonMapping::default(),
+            switch_channels: [-1, -1], // arm, mode — unassigned by default
+            switch_inverted: [false, false],
+            switch_threshold: 0.5,
 
             hid_axes: [0.0; MAX_CHANNELS],
             hid_raw: [0; MAX_CHANNELS],
-            calibration: std::array::from_fn(|_| ChannelCalibration::default()),
+            calibration,
             hid_connected: false,
-            hid_device_name: String::new(),
 
             keys_down: std::collections::HashSet::new(),
 
             armed: false,
             boost: false,
-            prev_arm_button: false,
-            prev_mode_button: false,
+            prev_arm_state: false,
+            prev_mode_state: false,
 
             mode_switch_triggered: false,
             reset_triggered: false,
+            calibrating: false,
+            listening: None,
+            listen_baseline: [0.0; MAX_CHANNELS],
         }
+    }
+
+    /// Start listening for channel assignment.
+    pub fn start_listen(&mut self, target: usize) {
+        self.listen_baseline = self.hid_axes;
+        self.listening = Some(target);
+    }
+
+    /// Check if a channel moved significantly from baseline → assign it.
+    pub fn poll_listen(&mut self) -> bool {
+        if let Some(target) = self.listening {
+            for i in 0..MAX_CHANNELS {
+                let delta = (self.hid_axes[i] - self.listen_baseline[i]).abs();
+                if delta > 0.5 {
+                    // Found the channel that moved
+                    if target < 4 {
+                        self.axis_map[target].channel = i as i32;
+                    } else if target == 10 {
+                        self.switch_channels[0] = i as i32;
+                    } else if target == 11 {
+                        self.switch_channels[1] = i as i32;
+                    }
+                    self.listening = None;
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Feed raw HID report bytes (16-bit LE channels).
@@ -156,6 +208,20 @@ impl Controller {
         for i in 0..channel_count {
             let raw = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
             self.hid_raw[i] = raw;
+            // Auto-learn min/max only during calibration
+            if self.calibrating {
+                let cal = &mut self.calibration[i];
+                match cal.min {
+                    None => cal.min = Some(raw),
+                    Some(m) if raw < m => cal.min = Some(raw),
+                    _ => {}
+                }
+                match cal.max {
+                    None => cal.max = Some(raw),
+                    Some(m) if raw > m => cal.max = Some(raw),
+                    _ => {}
+                }
+            }
             self.hid_axes[i] = self.calibration[i].apply(raw);
         }
         self.hid_connected = true;
@@ -177,51 +243,56 @@ impl Controller {
         self.mode_switch_triggered = false;
         self.reset_triggered = false;
 
-        // Start with zeros
+        // Poll channel listen mode
+        self.poll_listen();
+
         let mut roll = 0.0f32;
         let mut pitch = 0.0f32;
-        let mut throttle = -1.0f32; // idle
+        let mut throttle = -1.0f32;
         let mut yaw = 0.0f32;
 
-        // ---- HID input ----
+        // ---- HID axes ----
         if self.hid_connected {
-            for (i, map) in self.axis_map.iter().enumerate() {
+            let axes = [&mut roll, &mut pitch, &mut throttle, &mut yaw];
+            for (i, val_out) in axes.into_iter().enumerate() {
+                let map = &self.axis_map[i];
                 if map.channel >= 0 && (map.channel as usize) < MAX_CHANNELS {
                     let mut val = self.hid_axes[map.channel as usize];
                     if map.inverted { val = -val; }
                     if val.abs() < map.deadzone { val = 0.0; }
                     val = apply_expo(val, map.expo);
                     val *= map.rate;
-                    match i {
-                        0 => roll = val,
-                        1 => pitch = val,
-                        2 => throttle = val,
-                        3 => yaw = val,
-                        _ => {}
-                    }
+                    *val_out = val;
                 }
             }
 
-            // Button: arm
-            let arm_pressed = self.read_button(&self.button_map_arm);
-            let arm_rising = arm_pressed && !self.prev_arm_button;
-            self.prev_arm_button = arm_pressed;
-            if arm_rising { self.armed = !self.armed; }
+            // Switch: arm (edge-triggered toggle)
+            if self.switch_channels[0] >= 0 {
+                let ch = self.switch_channels[0] as usize;
+                if ch < MAX_CHANNELS {
+                    let mut v = self.hid_axes[ch];
+                    if self.switch_inverted[0] { v = -v; }
+                    let state = v > self.switch_threshold;
+                    if state && !self.prev_arm_state { self.armed = !self.armed; }
+                    self.prev_arm_state = state;
+                }
+            }
 
-            // Button: mode switch
-            let mode_pressed = self.read_button(&self.button_map_mode);
-            let mode_rising = mode_pressed && !self.prev_mode_button;
-            self.prev_mode_button = mode_pressed;
-            if mode_rising { self.mode_switch_triggered = true; }
+            // Switch: mode (edge-triggered)
+            if self.switch_channels[1] >= 0 {
+                let ch = self.switch_channels[1] as usize;
+                if ch < MAX_CHANNELS {
+                    let mut v = self.hid_axes[ch];
+                    if self.switch_inverted[1] { v = -v; }
+                    let state = v > self.switch_threshold;
+                    if state && !self.prev_mode_state { self.mode_switch_triggered = true; }
+                    self.prev_mode_state = state;
+                }
+            }
         }
 
         // ---- Keyboard overlay ----
         let kb = |k: KeyCode| self.keys_down.contains(&k);
-
-        // Keyboard arm (Space) — edge toggle
-        // (handled externally in main.rs for now)
-
-        // Keyboard axes (additive with HID)
         if kb(KeyCode::ArrowRight) { roll += 1.0; }
         if kb(KeyCode::ArrowLeft) { roll -= 1.0; }
         if kb(KeyCode::ArrowUp) { pitch += 1.0; }
@@ -230,9 +301,7 @@ impl Controller {
         if kb(KeyCode::KeyS) { throttle = -1.0; }
         if kb(KeyCode::KeyD) { yaw += 1.0; }
         if kb(KeyCode::KeyA) { yaw -= 1.0; }
-
         self.boost = kb(KeyCode::ShiftLeft) || kb(KeyCode::ShiftRight);
-
         if kb(KeyCode::KeyR) { self.reset_triggered = true; }
 
         DroneInput {
@@ -242,19 +311,8 @@ impl Controller {
             yaw: clamp(yaw, -1.0, 1.0),
             armed: self.armed,
             boost: self.boost,
-            rates: [
-                self.axis_map[0].rate,
-                self.axis_map[1].rate,
-                self.axis_map[3].rate,
-            ],
+            rates: [self.axis_map[0].rate, self.axis_map[1].rate, self.axis_map[3].rate],
         }
-    }
-
-    fn read_button(&self, map: &ButtonMapping) -> bool {
-        if map.channel < 0 || map.channel as usize >= MAX_CHANNELS { return false; }
-        let mut v = self.hid_axes[map.channel as usize];
-        if map.inverted { v = -v; }
-        v > map.threshold
     }
 }
 
@@ -304,11 +362,13 @@ pub fn open_hid_device(
         loop {
             match device.read_timeout(&mut buf, 50) {
                 Ok(0) => continue, // timeout, no data
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
+                Ok(n) if n > 1 => {
+                    // Skip first byte (report ID), send channel data only
+                    if tx.send(buf[1..n].to_vec()).is_err() {
                         break; // receiver dropped
                     }
                 }
+                Ok(_) => continue,
                 Err(e) => {
                     log::error!("HID read error: {}", e);
                     break;

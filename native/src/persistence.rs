@@ -100,3 +100,49 @@ pub fn load_settings() -> AppSettings {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
+
+/// Calibration data (serializable).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CalibrationData {
+    pub channels: Vec<[Option<u16>; 2]>, // [min, max] per channel
+}
+
+/// Get config directory path (always the same regardless of CWD).
+fn config_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".config").join("mindcloud-fly")
+    } else {
+        PathBuf::from(".")
+    }
+}
+
+fn ensure_config_dir() {
+    let _ = std::fs::create_dir_all(config_dir());
+}
+
+/// Save HID calibration to disk.
+pub fn save_calibration(calibration: &[crate::input::ChannelCalibration]) -> anyhow::Result<()> {
+    ensure_config_dir();
+    let data = CalibrationData {
+        channels: calibration.iter().map(|c| [c.min, c.max]).collect(),
+    };
+    let json = serde_json::to_string_pretty(&data)?;
+    std::fs::write(config_dir().join("calibration.json"), json)?;
+    Ok(())
+}
+
+/// Load HID calibration from disk.
+pub fn load_calibration(calibration: &mut [crate::input::ChannelCalibration]) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join("calibration.json")) {
+        if let Ok(data) = serde_json::from_str::<CalibrationData>(&json) {
+            for (i, ch) in data.channels.iter().enumerate() {
+                if i < calibration.len() {
+                    calibration[i].min = ch[0];
+                    calibration[i].max = ch[1];
+                    calibration[i].center = None; // center auto-computed from min/max
+                }
+            }
+            log::info!("Loaded calibration for {} channels", data.channels.len());
+        }
+    }
+}

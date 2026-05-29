@@ -17,7 +17,8 @@ pub fn draw_settings(
 
     egui::Window::new("⚙ Settings")
         .open(open)
-        .default_width(300.0)
+        .default_width(450.0)
+        .min_width(400.0)
         .order(egui::Order::Tooltip)
         .show(ctx, |ui| {
             egui::CollapsingHeader::new("Flight Mode")
@@ -95,43 +96,95 @@ pub fn draw_settings(
                     ui.horizontal(|ui| { ui.label("Alt Kd:"); ui.add(egui::DragValue::new(&mut drone.drone_alt_kd).range(0.0..=5.0).speed(0.01)); });
                 });
 
-            egui::CollapsingHeader::new("Controller Axes")
+            egui::CollapsingHeader::new("Channel Mapping")
                 .default_open(false)
                 .show(ui, |ui| {
-                    let labels = ["Roll", "Pitch", "Throttle", "Yaw", "Cam Tilt"];
-                    for (i, label) in labels.iter().enumerate() {
+                    ui.label(RichText::new("Click channel button, then move the stick to assign").size(10.0).color(Color32::GRAY));
+                    ui.add_space(4.0);
+                    // Axes
+                    for i in 0..4 {
+                        let name = crate::input::AXIS_NAMES[i];
+                        let ch = controller.axis_map[i].channel;
+                        let ch_label = if ch >= 0 { format!("CH{}", ch + 1) } else { "---".into() };
+                        let is_listening = controller.listening == Some(i);
                         ui.horizontal(|ui| {
-                            ui.label(format!("{}:", label));
-                            ui.label("Ch:");
-                            ui.add(egui::DragValue::new(&mut controller.axis_map[i].channel).range(-1..=15));
+                            ui.label(format!("{:>9}:", name));
+                            let btn_text = if is_listening { "[ ... ]".into() } else { ch_label };
+                            let btn_color = if is_listening { Color32::from_rgb(255, 180, 0) } else { Color32::from_rgb(100, 180, 255) };
+                            if ui.button(RichText::new(&btn_text).color(btn_color).size(12.0)).clicked() {
+                                controller.start_listen(i);
+                            }
                             ui.checkbox(&mut controller.axis_map[i].inverted, "Inv");
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("  Dz:");
-                            ui.add(egui::DragValue::new(&mut controller.axis_map[i].deadzone).range(0.0..=0.5).speed(0.01));
-                            ui.label("Rate:");
-                            ui.add(egui::DragValue::new(&mut controller.axis_map[i].rate).range(0.1..=3.0).speed(0.05));
                             ui.label("Expo:");
-                            ui.add(egui::DragValue::new(&mut controller.axis_map[i].expo).range(0.0..=1.0).speed(0.05));
+                            ui.add(egui::DragValue::new(&mut controller.axis_map[i].expo).range(0.0..=1.0).speed(0.05).max_decimals(2));
+                        });
+                    }
+                    ui.add_space(6.0);
+                    // Switches
+                    for i in 0..2 {
+                        let name = crate::input::SWITCH_NAMES[i];
+                        let ch = controller.switch_channels[i];
+                        let ch_label = if ch >= 0 { format!("CH{}", ch + 1) } else { "---".into() };
+                        let target_id = 10 + i;
+                        let is_listening = controller.listening == Some(target_id);
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{:>9}:", name));
+                            let btn_text = if is_listening { "[ ... ]".into() } else { ch_label };
+                            let btn_color = if is_listening { Color32::from_rgb(255, 180, 0) } else { Color32::from_rgb(100, 200, 100) };
+                            if ui.button(RichText::new(&btn_text).color(btn_color).size(12.0)).clicked() {
+                                controller.start_listen(target_id);
+                            }
+                            ui.checkbox(&mut controller.switch_inverted[i], "Inv");
                         });
                     }
                 });
 
             if controller.hid_connected {
                 egui::CollapsingHeader::new("HID Channels (live)")
-                    .default_open(false)
+                    .default_open(true)
                     .show(ui, |ui| {
                         for i in 0..8 {
                             let v = controller.hid_axes[i];
                             ui.horizontal(|ui| {
-                                ui.label(format!("CH{:02}:", i));
-                                let bar_w = 100.0 * ((v + 1.0) / 2.0).clamp(0.0, 1.0);
-                                let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(100.0, 12.0), egui::Sense::hover());
+                                ui.label(format!("CH{:02}", i + 1));
+                                let bar_w = 200.0 * ((v + 1.0) / 2.0).clamp(0.0, 1.0);
+                                let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(200.0, 14.0), egui::Sense::hover());
                                 ui.painter().rect_filled(rect, 0.0, Color32::from_gray(40));
-                                let filled = egui::Rect::from_min_size(rect.min, egui::Vec2::new(bar_w, 12.0));
+                                // Center line
+                                let cx = rect.min.x + 100.0;
+                                ui.painter().line_segment([egui::Pos2::new(cx, rect.min.y), egui::Pos2::new(cx, rect.max.y)], egui::Stroke::new(1.0, Color32::from_gray(80)));
+                                let filled = egui::Rect::from_min_size(rect.min, egui::Vec2::new(bar_w, 14.0));
                                 ui.painter().rect_filled(filled, 0.0, Color32::from_rgb(0, 180, 100));
-                                ui.label(format!("{:.2}", v));
+                                ui.label(format!("{:+.2}", v));
                             });
+                        }
+                        ui.add_space(5.0);
+                        let is_calibrated = controller.calibration[0].is_calibrated() && !controller.calibrating;
+
+                        if controller.calibrating {
+                            ui.label(RichText::new("⏺ Recording... move all sticks to extremes").color(Color32::from_rgb(255, 180, 0)));
+                            if ui.button(RichText::new("    Finish Calibration    ").size(13.0)).clicked() {
+                                controller.calibrating = false;
+                                let _ = crate::persistence::save_calibration(&controller.calibration);
+                                log::info!("Calibration saved!");
+                            }
+                        } else if is_calibrated {
+                            ui.label(RichText::new("✓ Calibrated").size(11.0).color(Color32::from_rgb(80, 255, 80)));
+                            if ui.button(RichText::new("    Re-calibrate    ").size(12.0)).clicked() {
+                                for cal in controller.calibration.iter_mut() {
+                                    *cal = crate::input::ChannelCalibration::default();
+                                }
+                                controller.calibrating = true;
+                                log::info!("Calibration reset — move sticks to extremes");
+                            }
+                        } else {
+                            if ui.button(RichText::new("    Start Calibration    ").size(13.0)).clicked() {
+                                for cal in controller.calibration.iter_mut() {
+                                    *cal = crate::input::ChannelCalibration::default();
+                                }
+                                controller.calibrating = true;
+                                log::info!("Calibration started — move sticks to extremes");
+                            }
                         }
                     });
             }
