@@ -294,6 +294,8 @@ async fn main() {
                                 }
                                 // Always poll listen mode (channel mapping works while settings open)
                                 controller1.poll_listen();
+                                // Sync current mode for per-mode rate/expo
+                                controller1.current_mode = if drone1.flight_mode == drone::FlightMode::Fpv { 0 } else { 1 };
 
                                 if split {
                                     if !paused {

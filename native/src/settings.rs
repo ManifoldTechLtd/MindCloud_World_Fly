@@ -28,10 +28,14 @@ pub fn draw_settings(
 
     egui::Window::new("⚙ Settings")
         .open(open)
-        .default_width(450.0)
-        .min_width(400.0)
+        .resizable(false)
+        .default_size([480.0, 520.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .order(egui::Order::Tooltip)
         .show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.set_height(500.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
             egui::CollapsingHeader::new("Flight Mode")
                 .default_open(true)
                 .show(ui, |ui| {
@@ -112,6 +116,10 @@ pub fn draw_settings(
                 .show(ui, |ui| {
                     ui.label(RichText::new("Click channel button, then move the stick to assign").size(10.0).color(Color32::GRAY));
                     ui.add_space(4.0);
+                    let m = controller.current_mode.min(1);
+                    let mode_label = if m == 0 { "FPV" } else { "Drone" };
+                    ui.label(RichText::new(format!("Mode: {} (rate/expo below apply to this mode)", mode_label)).size(10.0).color(Color32::from_rgb(100, 200, 150)));
+                    ui.add_space(4.0);
                     // Axes
                     for i in 0..4 {
                         let name = crate::input::AXIS_NAMES[i];
@@ -128,8 +136,12 @@ pub fn draw_settings(
                             if ui.checkbox(&mut controller.axis_map[i].inverted, "Inv").changed() {
                                 let _ = crate::persistence::save_controller_mapping(controller);
                             }
+                            ui.label("Rate:");
+                            if ui.add(egui::DragValue::new(&mut controller.mode_rate[m][i]).range(0.1..=3.0).speed(0.05).max_decimals(2)).changed() {
+                                let _ = crate::persistence::save_controller_mapping(controller);
+                            }
                             ui.label("Expo:");
-                            if ui.add(egui::DragValue::new(&mut controller.axis_map[i].expo).range(0.0..=1.0).speed(0.05).max_decimals(2)).changed() {
+                            if ui.add(egui::DragValue::new(&mut controller.mode_expo[m][i]).range(0.0..=1.0).speed(0.05).max_decimals(2)).changed() {
                                 let _ = crate::persistence::save_controller_mapping(controller);
                             }
                         });
@@ -235,13 +247,6 @@ pub fn draw_settings(
                     }
                 });
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                let arm_text = if *armed { "DISARM" } else { "ARM" };
-                let arm_color = if *armed { Color32::from_rgb(255, 80, 80) } else { Color32::from_rgb(80, 255, 80) };
-                if ui.button(RichText::new(arm_text).color(arm_color).strong()).clicked() {
-                    *armed = !*armed;
-                }
-            });
+            }); // end ScrollArea
         });
 }

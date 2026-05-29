@@ -112,7 +112,10 @@ pub struct CalibrationData {
 pub struct ControllerMapping {
     pub axis_channels: [i32; 4],       // roll, pitch, throttle, yaw
     pub axis_inverted: [bool; 4],
-    pub axis_expo: [f32; 4],
+    pub axis_expo_fpv: [f32; 4],       // expo per axis for FPV mode
+    pub axis_expo_drone: [f32; 4],     // expo per axis for Drone mode
+    pub axis_rate_fpv: [f32; 4],       // rate per axis for FPV mode
+    pub axis_rate_drone: [f32; 4],     // rate per axis for Drone mode
     pub switch_channels: [i32; 2],     // arm, mode
     pub switch_inverted: [bool; 2],
     pub switch_level_mode: [bool; 2],
@@ -164,7 +167,10 @@ pub fn save_controller_mapping(ctrl: &crate::input::Controller) -> anyhow::Resul
     let map = ControllerMapping {
         axis_channels: std::array::from_fn(|i| ctrl.axis_map[i].channel),
         axis_inverted: std::array::from_fn(|i| ctrl.axis_map[i].inverted),
-        axis_expo: std::array::from_fn(|i| ctrl.axis_map[i].expo),
+        axis_expo_fpv: ctrl.mode_expo[0],
+        axis_expo_drone: ctrl.mode_expo[1],
+        axis_rate_fpv: ctrl.mode_rate[0],
+        axis_rate_drone: ctrl.mode_rate[1],
         switch_channels: ctrl.switch_channels,
         switch_inverted: ctrl.switch_inverted,
         switch_level_mode: ctrl.switch_level_mode,
@@ -181,8 +187,11 @@ pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
             for i in 0..4 {
                 ctrl.axis_map[i].channel = map.axis_channels[i];
                 ctrl.axis_map[i].inverted = map.axis_inverted[i];
-                ctrl.axis_map[i].expo = map.axis_expo[i];
             }
+            ctrl.mode_expo[0] = map.axis_expo_fpv;
+            ctrl.mode_expo[1] = map.axis_expo_drone;
+            ctrl.mode_rate[0] = map.axis_rate_fpv;
+            ctrl.mode_rate[1] = map.axis_rate_drone;
             ctrl.switch_channels = map.switch_channels;
             ctrl.switch_inverted = map.switch_inverted;
             ctrl.switch_level_mode = map.switch_level_mode;

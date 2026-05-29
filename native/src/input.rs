@@ -106,6 +106,9 @@ pub const SWITCH_NAMES: [&str; 2] = ["Arm", "Mode"];
 pub struct Controller {
     /// Axis mappings: roll, pitch, throttle, yaw (indices 0-3)
     pub axis_map: [AxisMapping; 4],
+    /// Per-mode expo and rate (index: 0=FPV, 1=Drone)
+    pub mode_expo: [[f32; 4]; 2],  // [fpv][roll,pitch,thr,yaw], [drone][...]
+    pub mode_rate: [[f32; 4]; 2],  // same
     /// Switch channel mappings: arm (0), mode (1). Channel -1 = unassigned.
     pub switch_channels: [i32; 2],
     pub switch_inverted: [bool; 2],
@@ -133,6 +136,8 @@ pub struct Controller {
 
     /// Calibration in progress
     pub calibrating: bool,
+    /// Current flight mode index (0=FPV, 1=Drone) — set externally by main.rs
+    pub current_mode: usize,
 
     /// Channel listen mode: Some(axis_or_switch_index) means waiting for user to move a stick
     /// axis 0-3 = axis mapping, 10/11 = switch mapping
@@ -152,10 +157,12 @@ impl Controller {
                 AxisMapping { channel: 2, ..Default::default() },  // throttle
                 AxisMapping { channel: 3, ..Default::default() },  // yaw
             ],
-            switch_channels: [-1, -1], // arm, mode — unassigned by default
+            mode_expo: [[0.0; 4]; 2],  // [FPV, Drone] × [roll, pitch, thr, yaw]
+            mode_rate: [[1.0; 4]; 2],  // default rate = 1.0
+            switch_channels: [-1, -1],
             switch_inverted: [false, false],
             switch_threshold: 0.5,
-            switch_level_mode: [false, false], // default: toggle (momentary switch)
+            switch_level_mode: [false, false],
 
             hid_axes: [0.0; MAX_CHANNELS],
             hid_raw: [0; MAX_CHANNELS],
@@ -172,6 +179,7 @@ impl Controller {
             mode_switch_triggered: false,
             reset_triggered: false,
             calibrating: false,
+            current_mode: 0,
             listening: None,
             listen_baseline: [0.0; MAX_CHANNELS],
         };
@@ -266,8 +274,9 @@ impl Controller {
                     let mut val = self.hid_axes[map.channel as usize];
                     if map.inverted { val = -val; }
                     if val.abs() < map.deadzone { val = 0.0; }
-                    val = apply_expo(val, map.expo);
-                    val *= map.rate;
+                    let m = self.current_mode.min(1);
+                    val = apply_expo(val, self.mode_expo[m][i]);
+                    val *= self.mode_rate[m][i];
                     *val_out = val;
                 }
             }
