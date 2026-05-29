@@ -48,67 +48,43 @@ pub fn draw_settings(
             egui::CollapsingHeader::new("Physics")
                 .default_open(true)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Mass (g):");
-                        ui.add(egui::DragValue::new(&mut drone.mass).range(50.0..=5000.0).speed(10.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Max Thrust (gf):");
-                        ui.add(egui::DragValue::new(&mut drone.max_thrust).range(100.0..=10000.0).speed(50.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Drag Cd:");
-                        ui.add(egui::DragValue::new(&mut drone.drag_cd).range(0.0..=5.0).speed(0.05));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Drag Area (m²):");
-                        ui.add(egui::DragValue::new(&mut drone.drag_area).range(0.001..=0.5).speed(0.001));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Drone Size (m):");
-                        ui.add(egui::DragValue::new(&mut drone.drone_size).range(0.05..=2.0).speed(0.01));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Collision Radius:");
-                        ui.add(egui::DragValue::new(&mut drone.collision_radius).range(0.05..=2.0).speed(0.01));
-                    });
+                    let mut changed = false;
+                    ui.horizontal(|ui| { ui.label("Mass (g):"); changed |= ui.add(egui::DragValue::new(&mut drone.mass).range(50.0..=5000.0).speed(10.0)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Max Thrust (gf):"); changed |= ui.add(egui::DragValue::new(&mut drone.max_thrust).range(100.0..=10000.0).speed(50.0)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Drag Cd:"); changed |= ui.add(egui::DragValue::new(&mut drone.drag_cd).range(0.0..=5.0).speed(0.05)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Drag Area (m²):"); changed |= ui.add(egui::DragValue::new(&mut drone.drag_area).range(0.001..=0.5).speed(0.001)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Drone Size (m):"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_size).range(0.05..=2.0).speed(0.01)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Collision Radius:"); changed |= ui.add(egui::DragValue::new(&mut drone.collision_radius).range(0.05..=2.0).speed(0.01)).changed(); });
+                    if changed { let _ = crate::persistence::save_drone_settings(drone); }
                 });
 
             egui::CollapsingHeader::new("FPV Rates")
                 .default_open(false)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Max Pitch Rate (°/s):");
-                        ui.add(egui::DragValue::new(&mut drone.max_pitch_rate).range(50.0..=1200.0).speed(10.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Max Roll Rate (°/s):");
-                        ui.add(egui::DragValue::new(&mut drone.max_roll_rate).range(50.0..=1200.0).speed(10.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Max Yaw Rate (°/s):");
-                        ui.add(egui::DragValue::new(&mut drone.max_yaw_rate).range(30.0..=600.0).speed(5.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Camera Mount Angle (°):");
-                        ui.add(egui::DragValue::new(&mut drone.camera_mount_angle).range(0.0..=60.0).speed(1.0));
-                    });
+                    let mut changed = false;
+                    ui.horizontal(|ui| { ui.label("Max Pitch Rate (°/s):"); changed |= ui.add(egui::DragValue::new(&mut drone.max_pitch_rate).range(50.0..=1200.0).speed(10.0)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Max Roll Rate (°/s):"); changed |= ui.add(egui::DragValue::new(&mut drone.max_roll_rate).range(50.0..=1200.0).speed(10.0)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Max Yaw Rate (°/s):"); changed |= ui.add(egui::DragValue::new(&mut drone.max_yaw_rate).range(30.0..=600.0).speed(5.0)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Camera Mount Angle (°):"); changed |= ui.add(egui::DragValue::new(&mut drone.camera_mount_angle).range(0.0..=60.0).speed(1.0)).changed(); });
+                    if changed { let _ = crate::persistence::save_drone_settings(drone); }
                 });
 
             egui::CollapsingHeader::new("Drone Mode PID")
                 .default_open(false)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| { ui.label("Pos Kp:"); ui.add(egui::DragValue::new(&mut drone.drone_pos_kp).range(0.0..=20.0).speed(0.1)); });
-                    ui.horizontal(|ui| { ui.label("Pos Ki:"); ui.add(egui::DragValue::new(&mut drone.drone_pos_ki).range(0.0..=10.0).speed(0.05)); });
-                    ui.horizontal(|ui| { ui.label("Pos Kd:"); ui.add(egui::DragValue::new(&mut drone.drone_pos_kd).range(0.0..=5.0).speed(0.01)); });
+                    let mut changed = false;
+                    ui.horizontal(|ui| { ui.label("Pos Kp:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_pos_kp).range(0.0..=20.0).speed(0.1)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Pos Ki:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_pos_ki).range(0.0..=10.0).speed(0.05)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Pos Kd:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_pos_kd).range(0.0..=5.0).speed(0.01)).changed(); });
                     ui.separator();
-                    ui.horizontal(|ui| { ui.label("Vel Kp:"); ui.add(egui::DragValue::new(&mut drone.drone_vel_kp).range(0.0..=20.0).speed(0.1)); });
-                    ui.horizontal(|ui| { ui.label("Vel Ki:"); ui.add(egui::DragValue::new(&mut drone.drone_vel_ki).range(0.0..=10.0).speed(0.05)); });
-                    ui.horizontal(|ui| { ui.label("Vel Kd:"); ui.add(egui::DragValue::new(&mut drone.drone_vel_kd).range(0.0..=5.0).speed(0.01)); });
+                    ui.horizontal(|ui| { ui.label("Vel Kp:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_vel_kp).range(0.0..=20.0).speed(0.1)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Vel Ki:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_vel_ki).range(0.0..=10.0).speed(0.05)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Vel Kd:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_vel_kd).range(0.0..=5.0).speed(0.01)).changed(); });
                     ui.separator();
-                    ui.horizontal(|ui| { ui.label("Alt Kp:"); ui.add(egui::DragValue::new(&mut drone.drone_alt_kp).range(0.0..=20.0).speed(0.1)); });
-                    ui.horizontal(|ui| { ui.label("Alt Ki:"); ui.add(egui::DragValue::new(&mut drone.drone_alt_ki).range(0.0..=10.0).speed(0.05)); });
-                    ui.horizontal(|ui| { ui.label("Alt Kd:"); ui.add(egui::DragValue::new(&mut drone.drone_alt_kd).range(0.0..=5.0).speed(0.01)); });
+                    ui.horizontal(|ui| { ui.label("Alt Kp:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_alt_kp).range(0.0..=20.0).speed(0.1)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Alt Ki:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_alt_ki).range(0.0..=10.0).speed(0.05)).changed(); });
+                    ui.horizontal(|ui| { ui.label("Alt Kd:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_alt_kd).range(0.0..=5.0).speed(0.01)).changed(); });
+                    if changed { let _ = crate::persistence::save_drone_settings(drone); }
                 });
 
             egui::CollapsingHeader::new("Channel Mapping")
@@ -248,5 +224,6 @@ pub fn draw_settings(
                 });
 
             }); // end ScrollArea
+
         });
 }

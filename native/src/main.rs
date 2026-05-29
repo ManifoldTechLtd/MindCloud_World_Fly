@@ -137,10 +137,11 @@ async fn main() {
                             // Esc: close dialog or open exit dialog
                             if key == KeyCode::Escape && released {
                                 if show_exit_dialog { show_exit_dialog = false; }
-                                else if let Phase::Playing { ref mut settings_open, ref mut controller1, .. } = phase {
+                                else if let Phase::Playing { ref mut settings_open, ref mut controller1, ref mut drone1, .. } = phase {
                                     if *settings_open {
                                         *settings_open = false;
                                         let _ = persistence::save_controller_mapping(controller1);
+                                        let _ = persistence::save_drone_settings(drone1);
                                     }
                                     else { show_exit_dialog = true; }
                                 } else { show_exit_dialog = true; }
@@ -151,6 +152,7 @@ async fn main() {
                                 if key == KeyCode::F1 && released {
                                     if *settings_open {
                                         let _ = persistence::save_controller_mapping(controller1);
+                                        let _ = persistence::save_drone_settings(drone1);
                                     }
                                     *settings_open = !*settings_open;
                                 }
@@ -251,8 +253,8 @@ async fn main() {
                                 sc.resize(gpu.device(), s.width.max(1), s.height.max(1));
                                 scene = Some(sc);
 
-                                let mut d1=Drone::new(); d1.reset(0.,2.,0.);
-                                let mut d2=Drone::new(); d2.reset(2.,2.,0.);
+                                let mut d1=Drone::new(); persistence::load_drone_settings(&mut d1); d1.reset(0.,2.,0.);
+                                let mut d2=Drone::new(); persistence::load_drone_settings(&mut d2); d2.reset(2.,2.,0.);
                                 let(mut a1,mut a2,mut dm)=(false,false,!split);
                                 if split{dm=true;a1=true;a2=true;}
 

@@ -12,10 +12,9 @@ pub struct SceneRecord {
     pub best_lap_ms: Option<f64>,
 }
 
-/// Global app settings.
+/// Drone physics settings (persisted).
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AppSettings {
-    // Drone physics
+pub struct DroneSettings {
     pub mass: f32,
     pub max_thrust: f32,
     pub drag_cd: f32,
@@ -23,33 +22,71 @@ pub struct AppSettings {
     pub collision_radius: f32,
     pub drone_size: f32,
     pub camera_mount_angle: f32,
-
-    // Controller axis mapping
-    pub axis_channels: [i32; 5], // roll, pitch, throttle, yaw, cameraTilt
-    pub axis_inverted: [bool; 5],
-    pub axis_deadzone: [f32; 5],
-    pub axis_rate: [f32; 5],
-    pub axis_expo: [f32; 5],
+    pub max_pitch_rate: f32,
+    pub max_roll_rate: f32,
+    pub max_yaw_rate: f32,
+    // Drone mode PID
+    pub drone_pos_kp: f32,
+    pub drone_pos_ki: f32,
+    pub drone_pos_kd: f32,
+    pub drone_vel_kp: f32,
+    pub drone_vel_ki: f32,
+    pub drone_vel_kd: f32,
+    pub drone_alt_kp: f32,
+    pub drone_alt_ki: f32,
+    pub drone_alt_kd: f32,
 }
 
-impl Default for AppSettings {
+impl Default for DroneSettings {
     fn default() -> Self {
         Self {
-            mass: 500.0,
-            max_thrust: 1000.0,
-            drag_cd: 1.0,
-            drag_area: 0.01,
-            collision_radius: 0.3,
-            drone_size: 0.3,
-            camera_mount_angle: 30.0,
-            axis_channels: [0, 1, 2, 3, -1],
-            axis_inverted: [false; 5],
-            axis_deadzone: [0.0; 5],
-            axis_rate: [1.0; 5],
-            axis_expo: [0.0; 5],
+            mass: 500.0, max_thrust: 1000.0, drag_cd: 1.0, drag_area: 0.01,
+            collision_radius: 0.3, drone_size: 0.3, camera_mount_angle: 30.0,
+            max_pitch_rate: 220.0, max_roll_rate: 220.0, max_yaw_rate: 120.0,
+            drone_pos_kp: 2.0, drone_pos_ki: 0.3, drone_pos_kd: 0.1,
+            drone_vel_kp: 3.0, drone_vel_ki: 1.0, drone_vel_kd: 0.05,
+            drone_alt_kp: 4.0, drone_alt_ki: 2.0, drone_alt_kd: 0.1,
         }
     }
 }
+
+pub fn save_drone_settings(drone: &crate::drone::Drone) -> anyhow::Result<()> {
+    ensure_config_dir();
+    let s = DroneSettings {
+        mass: drone.mass, max_thrust: drone.max_thrust,
+        drag_cd: drone.drag_cd, drag_area: drone.drag_area,
+        collision_radius: drone.collision_radius, drone_size: drone.drone_size,
+        camera_mount_angle: drone.camera_mount_angle,
+        max_pitch_rate: drone.max_pitch_rate, max_roll_rate: drone.max_roll_rate,
+        max_yaw_rate: drone.max_yaw_rate,
+        drone_pos_kp: drone.drone_pos_kp, drone_pos_ki: drone.drone_pos_ki, drone_pos_kd: drone.drone_pos_kd,
+        drone_vel_kp: drone.drone_vel_kp, drone_vel_ki: drone.drone_vel_ki, drone_vel_kd: drone.drone_vel_kd,
+        drone_alt_kp: drone.drone_alt_kp, drone_alt_ki: drone.drone_alt_ki, drone_alt_kd: drone.drone_alt_kd,
+    };
+    let json = serde_json::to_string_pretty(&s)?;
+    std::fs::write(config_dir().join("drone.json"), json)?;
+    Ok(())
+}
+
+pub fn load_drone_settings(drone: &mut crate::drone::Drone) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join("drone.json")) {
+        if let Ok(s) = serde_json::from_str::<DroneSettings>(&json) {
+            drone.mass = s.mass; drone.max_thrust = s.max_thrust;
+            drone.drag_cd = s.drag_cd; drone.drag_area = s.drag_area;
+            drone.collision_radius = s.collision_radius; drone.drone_size = s.drone_size;
+            drone.camera_mount_angle = s.camera_mount_angle;
+            drone.max_pitch_rate = s.max_pitch_rate; drone.max_roll_rate = s.max_roll_rate;
+            drone.max_yaw_rate = s.max_yaw_rate;
+            drone.drone_pos_kp = s.drone_pos_kp; drone.drone_pos_ki = s.drone_pos_ki; drone.drone_pos_kd = s.drone_pos_kd;
+            drone.drone_vel_kp = s.drone_vel_kp; drone.drone_vel_ki = s.drone_vel_ki; drone.drone_vel_kd = s.drone_vel_kd;
+            drone.drone_alt_kp = s.drone_alt_kp; drone.drone_alt_ki = s.drone_alt_ki; drone.drone_alt_kd = s.drone_alt_kd;
+            log::info!("Loaded drone settings");
+        }
+    }
+}
+
+// Keep old AppSettings for backward compat (unused now)
+pub type AppSettings = DroneSettings;
 
 /// Generate a storage key from scene filename + size.
 pub fn scene_key(file_path: &Path) -> String {
