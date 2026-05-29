@@ -425,7 +425,7 @@ impl Drone {
 
         // Sticks → target angular rates
         let t_pr = input.pitch * self.max_pitch_rate * rate_p * boost;
-        let t_rr = -input.roll * self.max_roll_rate * rate_r * boost;
+        let t_rr = input.roll * self.max_roll_rate * rate_r * boost;
         let t_yr = input.yaw * self.max_yaw_rate * rate_y * boost;
 
         // Smooth rate tracking

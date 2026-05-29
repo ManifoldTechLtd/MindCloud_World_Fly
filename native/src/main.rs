@@ -38,8 +38,8 @@ struct Opt {
 struct KeyState { w:bool,s:bool,a:bool,d:bool,up:bool,down:bool,left:bool,right:bool }
 impl KeyState {
     fn to_input(&self, armed: bool) -> DroneInput {
-        // Convention (same as JS): pitch forward (ArrowUp) = negative = nose down
-        DroneInput { roll:if self.right{1.}else if self.left{-1.}else{0.},
+        // Convention: right key = roll right = negative (body Z+ = roll left)
+        DroneInput { roll:if self.right{-1.}else if self.left{1.}else{0.},
             pitch:if self.up{-1.}else if self.down{1.}else{0.},
             throttle:if self.w{0.5}else if self.s{-1.}else{-0.2},
             yaw:if self.d{1.}else if self.a{-1.}else{0.},
@@ -50,7 +50,7 @@ impl KeyState {
 struct KeyStateP2 { i:bool,k:bool,j:bool,l:bool,t:bool,g:bool,f:bool,h:bool }
 impl KeyStateP2 {
     fn to_input(&self, armed: bool) -> DroneInput {
-        DroneInput { roll:if self.l{1.}else if self.j{-1.}else{0.},
+        DroneInput { roll:if self.l{-1.}else if self.j{1.}else{0.},
             pitch:if self.i{-1.}else if self.k{1.}else{0.},
             throttle:if self.t{0.5}else if self.g{-1.}else{-0.2},
             yaw:if self.h{1.}else if self.f{-1.}else{0.},
