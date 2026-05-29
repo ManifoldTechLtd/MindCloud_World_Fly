@@ -1,9 +1,20 @@
 /// Settings panel — egui UI for drone physics + controller config.
 
 use egui::{Color32, RichText};
+use std::sync::Mutex;
 
 use crate::drone::{Drone, FlightMode};
 use crate::input::Controller;
+
+// Static state for HID device picker
+static DETECTED_DEVICES: Mutex<Option<Vec<crate::input::HidDeviceInfo>>> = Mutex::new(None);
+static SELECTED_HID_PATH: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
+
+/// Check if the user selected a HID device from the settings panel.
+/// Returns the path if one was selected (caller should open it).
+pub fn take_selected_hid_path() -> Option<std::ffi::CString> {
+    SELECTED_HID_PATH.lock().unwrap().take()
+}
 
 /// Draw the settings panel. Returns true if it should be visible.
 pub fn draw_settings(
@@ -114,9 +125,13 @@ pub fn draw_settings(
                             if ui.button(RichText::new(&btn_text).color(btn_color).size(12.0)).clicked() {
                                 controller.start_listen(i);
                             }
-                            ui.checkbox(&mut controller.axis_map[i].inverted, "Inv");
+                            if ui.checkbox(&mut controller.axis_map[i].inverted, "Inv").changed() {
+                                let _ = crate::persistence::save_controller_mapping(controller);
+                            }
                             ui.label("Expo:");
-                            ui.add(egui::DragValue::new(&mut controller.axis_map[i].expo).range(0.0..=1.0).speed(0.05).max_decimals(2));
+                            if ui.add(egui::DragValue::new(&mut controller.axis_map[i].expo).range(0.0..=1.0).speed(0.05).max_decimals(2)).changed() {
+                                let _ = crate::persistence::save_controller_mapping(controller);
+                            }
                         });
                     }
                     ui.add_space(6.0);
@@ -134,15 +149,24 @@ pub fn draw_settings(
                             if ui.button(RichText::new(&btn_text).color(btn_color).size(12.0)).clicked() {
                                 controller.start_listen(target_id);
                             }
-                            ui.checkbox(&mut controller.switch_inverted[i], "Inv");
+                            if ui.checkbox(&mut controller.switch_inverted[i], "Inv").changed() {
+                                let _ = crate::persistence::save_controller_mapping(controller);
+                            }
+                            let mode_label = if controller.switch_level_mode[i] { "Level" } else { "Toggle" };
+                            if ui.button(RichText::new(mode_label).size(10.0)).clicked() {
+                                controller.switch_level_mode[i] = !controller.switch_level_mode[i];
+                                let _ = crate::persistence::save_controller_mapping(controller);
+                            }
                         });
                     }
                 });
 
-            if controller.hid_connected {
-                egui::CollapsingHeader::new("HID Channels (live)")
-                    .default_open(true)
-                    .show(ui, |ui| {
+            egui::CollapsingHeader::new("HID Input")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if controller.hid_connected {
+                        ui.label(RichText::new("✓ Device connected").size(11.0).color(Color32::from_rgb(80, 255, 80)));
+                        ui.add_space(4.0);
                         for i in 0..8 {
                             let v = controller.hid_axes[i];
                             ui.horizontal(|ui| {
@@ -150,7 +174,6 @@ pub fn draw_settings(
                                 let bar_w = 200.0 * ((v + 1.0) / 2.0).clamp(0.0, 1.0);
                                 let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(200.0, 14.0), egui::Sense::hover());
                                 ui.painter().rect_filled(rect, 0.0, Color32::from_gray(40));
-                                // Center line
                                 let cx = rect.min.x + 100.0;
                                 ui.painter().line_segment([egui::Pos2::new(cx, rect.min.y), egui::Pos2::new(cx, rect.max.y)], egui::Stroke::new(1.0, Color32::from_gray(80)));
                                 let filled = egui::Rect::from_min_size(rect.min, egui::Vec2::new(bar_w, 14.0));
@@ -160,34 +183,57 @@ pub fn draw_settings(
                         }
                         ui.add_space(5.0);
                         let is_calibrated = controller.calibration[0].is_calibrated() && !controller.calibrating;
-
                         if controller.calibrating {
                             ui.label(RichText::new("⏺ Recording... move all sticks to extremes").color(Color32::from_rgb(255, 180, 0)));
                             if ui.button(RichText::new("    Finish Calibration    ").size(13.0)).clicked() {
                                 controller.calibrating = false;
                                 let _ = crate::persistence::save_calibration(&controller.calibration);
-                                log::info!("Calibration saved!");
                             }
                         } else if is_calibrated {
                             ui.label(RichText::new("✓ Calibrated").size(11.0).color(Color32::from_rgb(80, 255, 80)));
                             if ui.button(RichText::new("    Re-calibrate    ").size(12.0)).clicked() {
-                                for cal in controller.calibration.iter_mut() {
-                                    *cal = crate::input::ChannelCalibration::default();
-                                }
+                                for cal in controller.calibration.iter_mut() { *cal = crate::input::ChannelCalibration::default(); }
                                 controller.calibrating = true;
-                                log::info!("Calibration reset — move sticks to extremes");
                             }
                         } else {
                             if ui.button(RichText::new("    Start Calibration    ").size(13.0)).clicked() {
-                                for cal in controller.calibration.iter_mut() {
-                                    *cal = crate::input::ChannelCalibration::default();
-                                }
+                                for cal in controller.calibration.iter_mut() { *cal = crate::input::ChannelCalibration::default(); }
                                 controller.calibrating = true;
-                                log::info!("Calibration started — move sticks to extremes");
                             }
                         }
-                    });
-            }
+                        ui.add_space(5.0);
+                        if ui.button("Disconnect / Change Device").clicked() {
+                            controller.hid_connected = false;
+                        }
+                    } else {
+                        ui.label(RichText::new("No HID device connected").size(12.0).color(Color32::from_rgb(200, 150, 50)));
+                        ui.add_space(5.0);
+                        if ui.button(RichText::new("    Detect HID Devices    ").size(13.0)).clicked() {
+                            // List devices and store for selection
+                            let devices = crate::input::list_hid_devices();
+                            DETECTED_DEVICES.lock().unwrap().replace(devices);
+                        }
+                        // Show detected device list if available
+                        let mut selected_path: Option<std::ffi::CString> = None;
+                        if let Some(ref devices) = *DETECTED_DEVICES.lock().unwrap() {
+                            if devices.is_empty() {
+                                ui.label(RichText::new("No HID devices found").size(11.0).color(Color32::GRAY));
+                            } else {
+                                ui.label(RichText::new("Select a device:").size(11.0));
+                                for dev in devices {
+                                    let label = format!("{} ({:04X}:{:04X})", dev.product_name, dev.vendor_id, dev.product_id);
+                                    if ui.button(&label).clicked() {
+                                        selected_path = Some(dev.path.clone());
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(path) = selected_path {
+                            SELECTED_HID_PATH.lock().unwrap().replace(path);
+                            DETECTED_DEVICES.lock().unwrap().take();
+                        }
+                    }
+                });
 
             ui.separator();
             ui.horizontal(|ui| {

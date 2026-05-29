@@ -107,6 +107,17 @@ pub struct CalibrationData {
     pub channels: Vec<[Option<u16>; 2]>, // [min, max] per channel
 }
 
+/// Controller mapping data (serializable).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ControllerMapping {
+    pub axis_channels: [i32; 4],       // roll, pitch, throttle, yaw
+    pub axis_inverted: [bool; 4],
+    pub axis_expo: [f32; 4],
+    pub switch_channels: [i32; 2],     // arm, mode
+    pub switch_inverted: [bool; 2],
+    pub switch_level_mode: [bool; 2],
+}
+
 /// Get config directory path (always the same regardless of CWD).
 fn config_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
@@ -139,10 +150,43 @@ pub fn load_calibration(calibration: &mut [crate::input::ChannelCalibration]) {
                 if i < calibration.len() {
                     calibration[i].min = ch[0];
                     calibration[i].max = ch[1];
-                    calibration[i].center = None; // center auto-computed from min/max
+                    calibration[i].center = None;
                 }
             }
             log::info!("Loaded calibration for {} channels", data.channels.len());
+        }
+    }
+}
+
+/// Save controller mapping to disk.
+pub fn save_controller_mapping(ctrl: &crate::input::Controller) -> anyhow::Result<()> {
+    ensure_config_dir();
+    let map = ControllerMapping {
+        axis_channels: std::array::from_fn(|i| ctrl.axis_map[i].channel),
+        axis_inverted: std::array::from_fn(|i| ctrl.axis_map[i].inverted),
+        axis_expo: std::array::from_fn(|i| ctrl.axis_map[i].expo),
+        switch_channels: ctrl.switch_channels,
+        switch_inverted: ctrl.switch_inverted,
+        switch_level_mode: ctrl.switch_level_mode,
+    };
+    let json = serde_json::to_string_pretty(&map)?;
+    std::fs::write(config_dir().join("mapping.json"), json)?;
+    Ok(())
+}
+
+/// Load controller mapping from disk.
+pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join("mapping.json")) {
+        if let Ok(map) = serde_json::from_str::<ControllerMapping>(&json) {
+            for i in 0..4 {
+                ctrl.axis_map[i].channel = map.axis_channels[i];
+                ctrl.axis_map[i].inverted = map.axis_inverted[i];
+                ctrl.axis_map[i].expo = map.axis_expo[i];
+            }
+            ctrl.switch_channels = map.switch_channels;
+            ctrl.switch_inverted = map.switch_inverted;
+            ctrl.switch_level_mode = map.switch_level_mode;
+            log::info!("Loaded controller mapping");
         }
     }
 }

@@ -110,6 +110,8 @@ pub struct Controller {
     pub switch_channels: [i32; 2],
     pub switch_inverted: [bool; 2],
     pub switch_threshold: f32,
+    /// Trigger mode: false = toggle (momentary/self-reset switch), true = level (2-pos switch)
+    pub switch_level_mode: [bool; 2],
 
     // HID state
     pub hid_axes: [f32; MAX_CHANNELS],
@@ -143,7 +145,7 @@ impl Controller {
         let mut calibration: [ChannelCalibration; MAX_CHANNELS] = std::array::from_fn(|_| ChannelCalibration::default());
         crate::persistence::load_calibration(&mut calibration);
 
-        Self {
+        let mut ctrl = Self {
             axis_map: [
                 AxisMapping { channel: 0, ..Default::default() },  // roll
                 AxisMapping { channel: 1, ..Default::default() },  // pitch
@@ -153,6 +155,7 @@ impl Controller {
             switch_channels: [-1, -1], // arm, mode — unassigned by default
             switch_inverted: [false, false],
             switch_threshold: 0.5,
+            switch_level_mode: [false, false], // default: toggle (momentary switch)
 
             hid_axes: [0.0; MAX_CHANNELS],
             hid_raw: [0; MAX_CHANNELS],
@@ -171,7 +174,9 @@ impl Controller {
             calibrating: false,
             listening: None,
             listen_baseline: [0.0; MAX_CHANNELS],
-        }
+        };
+        crate::persistence::load_controller_mapping(&mut ctrl);
+        ctrl
     }
 
     /// Start listening for channel assignment.
@@ -195,6 +200,7 @@ impl Controller {
                         self.switch_channels[1] = i as i32;
                     }
                     self.listening = None;
+                    let _ = crate::persistence::save_controller_mapping(self);
                     return true;
                 }
             }
@@ -266,26 +272,38 @@ impl Controller {
                 }
             }
 
-            // Switch: arm (edge-triggered toggle)
+            // Switch: arm
             if self.switch_channels[0] >= 0 {
                 let ch = self.switch_channels[0] as usize;
                 if ch < MAX_CHANNELS {
                     let mut v = self.hid_axes[ch];
                     if self.switch_inverted[0] { v = -v; }
                     let state = v > self.switch_threshold;
-                    if state && !self.prev_arm_state { self.armed = !self.armed; }
+                    if self.switch_level_mode[0] {
+                        // Level mode (2-pos switch): armed follows switch position on transitions
+                        if state != self.prev_arm_state { self.armed = state; }
+                    } else {
+                        // Toggle mode (momentary): rising edge flips
+                        if state && !self.prev_arm_state { self.armed = !self.armed; }
+                    }
                     self.prev_arm_state = state;
                 }
             }
 
-            // Switch: mode (edge-triggered)
+            // Switch: mode
             if self.switch_channels[1] >= 0 {
                 let ch = self.switch_channels[1] as usize;
                 if ch < MAX_CHANNELS {
                     let mut v = self.hid_axes[ch];
                     if self.switch_inverted[1] { v = -v; }
                     let state = v > self.switch_threshold;
-                    if state && !self.prev_mode_state { self.mode_switch_triggered = true; }
+                    if self.switch_level_mode[1] {
+                        // Level mode: trigger on transitions only
+                        if state != self.prev_mode_state { self.mode_switch_triggered = true; }
+                    } else {
+                        // Toggle mode: rising edge
+                        if state && !self.prev_mode_state { self.mode_switch_triggered = true; }
+                    }
                     self.prev_mode_state = state;
                 }
             }

@@ -38,8 +38,11 @@ struct Opt {
 struct KeyState { w:bool,s:bool,a:bool,d:bool,up:bool,down:bool,left:bool,right:bool }
 impl KeyState {
     fn to_input(&self, armed: bool) -> DroneInput {
-        DroneInput { roll:if self.right{1.}else if self.left{-1.}else{0.}, pitch:if self.up{1.}else if self.down{-1.}else{0.},
-            throttle:if self.w{0.5}else if self.s{-1.}else{-0.2}, yaw:if self.d{1.}else if self.a{-1.}else{0.},
+        // Convention (same as JS): pitch forward (ArrowUp) = negative = nose down
+        DroneInput { roll:if self.right{1.}else if self.left{-1.}else{0.},
+            pitch:if self.up{-1.}else if self.down{1.}else{0.},
+            throttle:if self.w{0.5}else if self.s{-1.}else{-0.2},
+            yaw:if self.d{1.}else if self.a{-1.}else{0.},
             armed, boost:false, rates:[1.,1.,1.] }
     }
 }
@@ -47,8 +50,10 @@ impl KeyState {
 struct KeyStateP2 { i:bool,k:bool,j:bool,l:bool,t:bool,g:bool,f:bool,h:bool }
 impl KeyStateP2 {
     fn to_input(&self, armed: bool) -> DroneInput {
-        DroneInput { roll:if self.l{1.}else if self.j{-1.}else{0.}, pitch:if self.i{1.}else if self.k{-1.}else{0.},
-            throttle:if self.t{0.5}else if self.g{-1.}else{-0.2}, yaw:if self.h{1.}else if self.f{-1.}else{0.},
+        DroneInput { roll:if self.l{1.}else if self.j{-1.}else{0.},
+            pitch:if self.i{-1.}else if self.k{1.}else{0.},
+            throttle:if self.t{0.5}else if self.g{-1.}else{-0.2},
+            yaw:if self.h{1.}else if self.f{-1.}else{0.},
             armed, boost:false, rates:[1.,1.,1.] }
     }
 }
@@ -132,15 +137,23 @@ async fn main() {
                             // Esc: close dialog or open exit dialog
                             if key == KeyCode::Escape && released {
                                 if show_exit_dialog { show_exit_dialog = false; }
-                                else if let Phase::Playing { ref mut settings_open, .. } = phase {
-                                    if *settings_open { *settings_open = false; }
+                                else if let Phase::Playing { ref mut settings_open, ref mut controller1, .. } = phase {
+                                    if *settings_open {
+                                        *settings_open = false;
+                                        let _ = persistence::save_controller_mapping(controller1);
+                                    }
                                     else { show_exit_dialog = true; }
                                 } else { show_exit_dialog = true; }
                             }
 
                             if let Phase::Playing { ref mut keys1, ref mut keys2, ref mut armed1, ref mut armed2,
-                                ref mut drone_mode, ref mut drone1, ref mut drone2, ref mut settings_open, split, .. } = phase {
-                                if key == KeyCode::F1 && released { *settings_open = !*settings_open; }
+                                ref mut drone_mode, ref mut drone1, ref mut drone2, ref mut settings_open, ref mut controller1, split, .. } = phase {
+                                if key == KeyCode::F1 && released {
+                                    if *settings_open {
+                                        let _ = persistence::save_controller_mapping(controller1);
+                                    }
+                                    *settings_open = !*settings_open;
+                                }
                                 if key == KeyCode::KeyM && released && !split {
                                     *drone_mode = !*drone_mode;
                                     if *drone_mode { drone1.reset(0.,0.,0.); *armed1=true; } else { *armed1=false; }
@@ -243,20 +256,7 @@ async fn main() {
                                 let(mut a1,mut a2,mut dm)=(false,false,!split);
                                 if split{dm=true;a1=true;a2=true;}
 
-                                // Auto-open HID controller if available
-                                if hid_rx.is_none() {
-                                    let devices = input::list_hid_devices();
-                                    log::info!("HID devices found: {}", devices.len());
-                                    for d in &devices { log::info!("  {} (VID:{:04X} PID:{:04X})", d.product_name, d.vendor_id, d.product_id); }
-                                    // Open first non-mouse/keyboard device (likely RC transmitter)
-                                    if let Some(rc) = devices.iter().find(|d| d.product_name.contains("SIM") || d.product_name.contains("RADIO") || d.product_name.contains("RC")) {
-                                        log::info!("Opening HID: {}", rc.product_name);
-                                        match input::open_hid_device(&rc.path) {
-                                            Ok(rx) => { hid_rx = Some(rx); log::info!("HID device opened successfully"); }
-                                            Err(e) => { log::warn!("Failed to open HID: {}", e); }
-                                        }
-                                    }
-                                }
+                                // HID device is now managed via Settings panel (Detect → Select)
 
                                 phase=Phase::Playing{drone1:d1,drone2:d2,keys1:KeyState::default(),keys2:KeyStateP2::default(),
                                     armed1:a1,armed2:a2,drone_mode:dm,split,settings_open:false,controller1:input::Controller::new()};
@@ -272,11 +272,25 @@ async fn main() {
                                 let paused = *settings_open || show_exit_dialog;
                                 if !no_vsync { target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(1))); }
 
+                                // Check if user selected a new HID device from settings
+                                if let Some(path) = settings::take_selected_hid_path() {
+                                    hid_rx = None; // drop old receiver
+                                    controller1.hid_connected = false;
+                                    match input::open_hid_device(&path) {
+                                        Ok(rx) => { hid_rx = Some(rx); log::info!("HID device opened"); }
+                                        Err(e) => { log::warn!("Failed to open HID: {}", e); }
+                                    }
+                                }
+
                                 // Poll HID controller data (always, even when paused — needed for listen mode)
                                 if let Some(ref rx) = hid_rx {
+                                    // Check for disconnect
+                                    let mut got_data = false;
                                     while let Ok(data) = rx.try_recv() {
                                         controller1.feed_hid_report(&data);
+                                        got_data = true;
                                     }
+                                    let _ = got_data;
                                 }
                                 // Always poll listen mode (channel mapping works while settings open)
                                 controller1.poll_listen();
@@ -289,6 +303,13 @@ async fn main() {
                                             controller1.update()
                                         } else { keys1.to_input(*armed1) };
                                         *armed1 = i1.armed;
+                                        // Handle mode switch from controller
+                                        if controller1.mode_switch_triggered {
+                                            drone1.flight_mode = match drone1.flight_mode {
+                                                drone::FlightMode::Fpv => drone::FlightMode::Drone,
+                                                drone::FlightMode::Drone => drone::FlightMode::Fpv,
+                                            };
+                                        }
                                         drone1.update(dt_s, &i1);
                                         let i2=keys2.to_input(*armed2); drone2.update(dt_s,&i2);
                                     }
@@ -363,6 +384,12 @@ async fn main() {
                                             controller1.armed = *armed1; controller1.update()
                                         } else { keys1.to_input(*armed1) };
                                         *armed1 = i1.armed;
+                                        if controller1.mode_switch_triggered {
+                                            drone1.flight_mode = match drone1.flight_mode {
+                                                drone::FlightMode::Fpv => drone::FlightMode::Drone,
+                                                drone::FlightMode::Drone => drone::FlightMode::Fpv,
+                                            };
+                                        }
                                         drone1.update(dt_s, &i1);
                                     }
                                     apply_drone_cam(sc, drone1, dt);
