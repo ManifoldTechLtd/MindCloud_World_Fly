@@ -39,8 +39,8 @@ fn test_pitch_nose_down() {
     let fwd = q.rotate_vector(-Vector3::unit_z());
     
     println!("Pitch +30deg: up={:?} fwd={:?}", up, fwd);
-    println!("  up.z={:.3} (should be >0 if nose down, up tilts back)");
-    println!("  fwd.y={:.3} (should be <0 if nose down, forward points downward)");
+    println!("  up.z={:.3} (should be >0 if nose down, up tilts back)", up.z);
+    println!("  fwd.y={:.3} (should be <0 if nose down, forward points downward)", fwd.y);
     
     // Verify: positive rotation around X → Y goes toward Z → up tilts into Z (backward)
     // This means the nose goes DOWN (forward points downward)
@@ -63,7 +63,7 @@ fn test_body_rotation_after_yaw() {
     // After yaw 90 right, body X axis is now world Z (or -Z).
     // Body pitch should tilt around the new body X axis (world Z).
     // This means the nose (now pointing along +X) should go down.
-    println!("  fwd.y={:.3} (should be <0 = nose down)");
+    println!("  fwd.y={:.3} (should be <0 = nose down)", fwd.y);
     
     // The key question: does fwd.y go negative?
     // If body rotation works correctly, pitch should still nose-down

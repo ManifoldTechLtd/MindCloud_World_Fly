@@ -7,6 +7,7 @@ mod hud;
 mod input;
 mod menu_ui;
 mod persistence;
+mod scene_mesh;
 mod settings;
 mod spline;
 
@@ -102,6 +103,8 @@ async fn main() {
     };
 
     let mut scene: Option<SceneState> = None;
+    let mesh_ren = scene_mesh::MeshRenderer::new(gpu.device(), gpu.config.format);
+    let mut scene_entities: Vec<scene_mesh::Entity> = Vec::new();
     let mut hid_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>> = None;
     let mut last_time = Instant::now();
     let no_vsync = opt.no_vsync;
@@ -253,6 +256,9 @@ async fn main() {
                                 sc.resize(gpu.device(), s.width.max(1), s.height.max(1));
                                 scene = Some(sc);
 
+                                // Create debug axis entities in scene
+                                scene_entities = scene_mesh::create_axis_entities(gpu.device(), 5.0);
+
                                 let mut d1=Drone::new(); persistence::load_drone_settings(&mut d1); d1.reset(0.,2.,0.);
                                 let mut d2=Drone::new(); persistence::load_drone_settings(&mut d2); d2.reset(2.,2.,0.);
                                 let(mut a1,mut a2,mut dm)=(false,false,!split);
@@ -401,6 +407,18 @@ async fn main() {
                                     let surface_tex = match sc.render(&gpu, None) {
                                         Ok(t) => t, Err(_) => { gpu.resize(window.inner_size().width, window.inner_size().height); window.request_redraw(); return; }
                                     };
+                                    // Draw scene entities (debug axes etc.)
+                                    {
+                                        use web_splats::Camera;
+                                        let cam = &sc.splatting_args.camera;
+                                        let view = surface_tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                                            format: Some(gpu.config.format),
+                                            ..Default::default()
+                                        });
+                                        let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("mesh")});
+                                        mesh_ren.render(&mut enc, &view, gpu.queue(), cam.view_matrix(), cam.proj_matrix(), &scene_entities);
+                                        gpu.queue().submit([enc.finish()]);
+                                    }
                                     // egui HUD + dialogs
                                     gpu.egui.begin_frame(&gpu.window);
                                     {let ctx=gpu.egui.winit.egui_ctx().clone();

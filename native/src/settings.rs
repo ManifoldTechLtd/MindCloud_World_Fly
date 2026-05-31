@@ -35,7 +35,7 @@ pub fn draw_settings(
         .show(ctx, |ui| {
             ui.set_width(460.0);
             ui.set_height(500.0);
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::CollapsingHeader::new("Flight Mode")
                 .default_open(true)
                 .show(ui, |ui| {

@@ -90,9 +90,20 @@ pub fn draw_hud(
 
         draw_horizon(&painter, cx, cy, w, h, drone.body_pitch, drone.body_roll);
         draw_speed_tape(&painter, w, h, cx, cy, drone.speed);
-        draw_alt_tape(&painter, w, h, cx, cy, drone.y);
+        draw_alt_tape(&painter, w, h, cx, cy, drone.z);
         draw_heading(&painter, w, h, cx, cy, drone.yaw);
         draw_vsi(&painter, w, h, cx, cy, drone.vertical_speed);
+
+        // Debug: show world position XYZ
+        let pos_text = format!("X:{:.2} Y:{:.2} Z:{:.2}", drone.x, drone.y, drone.z);
+        painter.text(
+            egui::Pos2::new(cx, vp.min.y + 20.0),
+            egui::Align2::CENTER_CENTER,
+            pos_text,
+            egui::FontId::monospace(14.0),
+            Color32::YELLOW,
+        );
+
     }
 }
 

@@ -22,6 +22,8 @@ pub struct PlyReader<R: Read + Seek> {
     mip_splatting: Option<bool>,
     kernel_size: Option<f32>,
     background_color: Option<[f32; 3]>,
+    has_normals: bool,
+    scale_before_sh: bool,
 }
 
 impl<R: io::Read + io::Seek> PlyReader<R> {
@@ -36,6 +38,8 @@ impl<R: io::Read + io::Seek> PlyReader<R> {
         let background_color = Self::background_color(&header)
             .map_err(|e| log::warn!("could not parse background_color: {}", e))
             .unwrap_or_default();
+        let has_normals = Self::has_normals(&header);
+        let scale_before_sh = Self::scale_before_sh(&header);
         Ok(Self {
             header,
             reader,
@@ -44,7 +48,31 @@ impl<R: io::Read + io::Seek> PlyReader<R> {
             mip_splatting,
             kernel_size,
             background_color,
+            has_normals,
+            scale_before_sh,
         })
+    }
+
+    /// Check if the vertex element has normal properties (nx, ny, nz).
+    fn has_normals(header: &ply::Header) -> bool {
+        header.elements.get("vertex")
+            .map(|v| v.properties.contains_key("nx"))
+            .unwrap_or(false)
+    }
+
+    /// Detect property ordering: returns true if scale comes before f_dc in the header.
+    fn scale_before_sh(header: &ply::Header) -> bool {
+        if let Some(vertex) = header.elements.get("vertex") {
+            let keys: Vec<&String> = vertex.properties.keys().collect();
+            let scale_pos = keys.iter().position(|k| k.as_str() == "scale_0");
+            let fdc_pos = keys.iter().position(|k| k.as_str() == "f_dc_0");
+            match (scale_pos, fdc_pos) {
+                (Some(s), Some(f)) => s < f,
+                _ => false,
+            }
+        } else {
+            false
+        }
     }
 
     fn read_line<B: ByteOrder>(
@@ -54,39 +82,73 @@ impl<R: io::Read + io::Seek> PlyReader<R> {
         let mut pos = [0.; 3];
         self.reader.read_f32_into::<B>(&mut pos)?;
 
-        // skip normals
-        // for what ever reason it is faster to call read than seek ...
-        // so we just read them and never use them again
-        let mut _normals = [0.; 3];
-        self.reader.read_f32_into::<B>(&mut _normals)?;
-
-        let mut sh: [[f32; 3]; 16] = [[0.; 3]; 16];
-        self.reader.read_f32_into::<B>(&mut sh[0])?;
-        let mut sh_rest = [0.; 15 * 3];
-        let num_coefs = (sh_deg + 1) * (sh_deg + 1);
-        self.reader
-            .read_f32_into::<B>(&mut sh_rest[..(num_coefs - 1) * 3])?;
-
-        // higher order coefficients are stored with channel first (shape:[N,3,C])
-        for i in 0..(num_coefs - 1) {
-            for j in 0..3 {
-                sh[i + 1][j] = sh_rest[j * (num_coefs - 1) + i];
-            }
+        // Skip normals if present
+        if self.has_normals {
+            let mut _normals = [0.; 3];
+            self.reader.read_f32_into::<B>(&mut _normals)?;
         }
 
-        let opacity = sigmoid(self.reader.read_f32::<B>()?);
+        let num_coefs = (sh_deg + 1) * (sh_deg + 1);
+        let mut sh: [[f32; 3]; 16] = [[0.; 3]; 16];
+        let mut opacity_raw = 0f32;
+        let mut scale = Vector3::new(1.0f32, 1.0, 1.0);
+        let mut rot = Quaternion::new(1.0f32, 0.0, 0.0, 0.0);
 
-        let scale_1 = self.reader.read_f32::<B>()?.exp();
-        let scale_2 = self.reader.read_f32::<B>()?.exp();
-        let scale_3 = self.reader.read_f32::<B>()?.exp();
-        let scale = Vector3::new(scale_1, scale_2, scale_3);
+        if self.scale_before_sh {
+            // Format: x,y,z, scale_0,scale_1,scale_2, f_dc_0,f_dc_1,f_dc_2, opacity, rot_0..3, f_rest_*
+            let s0 = self.reader.read_f32::<B>()?.exp();
+            let s1 = self.reader.read_f32::<B>()?.exp();
+            let s2 = self.reader.read_f32::<B>()?.exp();
+            scale = Vector3::new(s0, s1, s2);
 
-        let rot_0 = self.reader.read_f32::<B>()?;
-        let rot_1 = self.reader.read_f32::<B>()?;
-        let rot_2 = self.reader.read_f32::<B>()?;
-        let rot_3 = self.reader.read_f32::<B>()?;
-        let rot = Quaternion::new(rot_0, rot_1, rot_2, rot_3).normalize();
+            self.reader.read_f32_into::<B>(&mut sh[0])?; // f_dc_0,1,2
 
+            opacity_raw = self.reader.read_f32::<B>()?;
+
+            let r0 = self.reader.read_f32::<B>()?;
+            let r1 = self.reader.read_f32::<B>()?;
+            let r2 = self.reader.read_f32::<B>()?;
+            let r3 = self.reader.read_f32::<B>()?;
+            rot = Quaternion::new(r0, r1, r2, r3).normalize();
+
+            // f_rest (SH higher order)
+            if num_coefs > 1 {
+                let mut sh_rest = [0.; 15 * 3];
+                self.reader.read_f32_into::<B>(&mut sh_rest[..(num_coefs - 1) * 3])?;
+                for i in 0..(num_coefs - 1) {
+                    for j in 0..3 {
+                        sh[i + 1][j] = sh_rest[j * (num_coefs - 1) + i];
+                    }
+                }
+            }
+        } else {
+            // Original format: x,y,z, [nx,ny,nz], f_dc_0,1,2, f_rest_*, opacity, scale_0,1,2, rot_0,1,2,3
+            self.reader.read_f32_into::<B>(&mut sh[0])?;
+            let mut sh_rest = [0.; 15 * 3];
+            if num_coefs > 1 {
+                self.reader.read_f32_into::<B>(&mut sh_rest[..(num_coefs - 1) * 3])?;
+            }
+            for i in 0..(num_coefs - 1) {
+                for j in 0..3 {
+                    sh[i + 1][j] = sh_rest[j * (num_coefs - 1) + i];
+                }
+            }
+
+            opacity_raw = self.reader.read_f32::<B>()?;
+
+            let s0 = self.reader.read_f32::<B>()?.exp();
+            let s1 = self.reader.read_f32::<B>()?.exp();
+            let s2 = self.reader.read_f32::<B>()?.exp();
+            scale = Vector3::new(s0, s1, s2);
+
+            let r0 = self.reader.read_f32::<B>()?;
+            let r1 = self.reader.read_f32::<B>()?;
+            let r2 = self.reader.read_f32::<B>()?;
+            let r3 = self.reader.read_f32::<B>()?;
+            rot = Quaternion::new(r0, r1, r2, r3).normalize();
+        }
+
+        let opacity = sigmoid(opacity_raw);
         let cov = build_cov(rot, scale);
 
         return Ok((

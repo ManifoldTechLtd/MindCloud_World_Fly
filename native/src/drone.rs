@@ -1,15 +1,33 @@
-/// Drone physics v3 — quaternion-based orientation.
+/// Drone physics v4 — NED body frame + quaternion rate integration.
 ///
-/// Faithfully ported from src/drone.js.
+/// Body coordinate system (NED):
+///   +X = Forward (camera optical axis when tilt=0)
+///   +Y = Right
+///   +Z = Down
+///   Thrust direction = body -Z (upward)
 ///
-/// All rotations are applied in the drone's BODY frame via quaternion
-/// multiplication.  This eliminates Euler-angle cross-coupling: roll is
-/// always around the drone's nose-to-tail axis regardless of heading.
+/// World coordinate system (Z-up, matching 3DGS field scene):
+///   +Z = Up, gravity along -Z
+///   XY = horizontal plane
+///
+/// `orientation` quaternion: with left-multiply integration (q_dot = -ω⊗q/2),
+/// Matrix3::from(orientation) ROWS are body axes expressed in world coordinates.
+///
+/// Initial orientation (spawn, see `ned_identity()`):
+///   body +X (forward) → world +Y
+///   body +Y (right)   → world +X
+///   body +Z (down)    → world -Z
+///
+/// Camera transform: cam_orient = CAM_TO_NED * orientation * tilt_q (left-multiply)
+///   CAM_TO_NED maps body axes to COLMAP camera axes (X-right, Y-down, Z-front).
+///
+/// Rotation update: q̇ = ½ (-ω) ⊗ q,  q_{k+1} = normalize(q_k + q̇·dt)
+///   where ω = (roll_rate, pitch_rate, yaw_rate) in body NED frame.
 ///
 /// FPV:   sticks → body-frame angular rates, throttle → thrust, no self-leveling
 /// Drone: sticks → velocity command → position setpoint, cascaded PID
 
-use cgmath::{InnerSpace, Matrix3, Quaternion, Rad, Rotation, Rotation3, SquareMatrix, Vector3};
+use cgmath::{InnerSpace, Matrix3, Quaternion, Rad, Rotation, Rotation3, Vector3};
 
 const DEG2RAD: f32 = std::f32::consts::PI / 180.0;
 const RAD2DEG: f32 = 180.0 / std::f32::consts::PI;
@@ -18,6 +36,20 @@ const AIR_DENSITY: f32 = 1.225;
 
 fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
     v.max(lo).min(hi)
+}
+
+/// Returns the quaternion that maps NED body axes to the Z-up world at spawn:
+///   body +X (forward) → world +Y
+///   body +Y (right)   → world +X
+///   body +Z (down)    → world -Z
+/// Thrust (body -Z) maps to world +Z (up). This is a proper rotation (det=+1).
+fn ned_identity() -> Quaternion<f32> {
+    // Matrix columns (cgmath: col_i = where body axis i maps in world):
+    //   col0 = (0, 1, 0)   [body+X → world+Y]
+    //   col1 = (1, 0, 0)   [body+Y → world+X]
+    //   col2 = (0, 0, -1)  [body+Z → world-Z]
+    // Quaternion: (w=0, x=√2/2, y=√2/2, z=0)
+    Quaternion::new(0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0)
 }
 
 // ---- Flight mode ----
@@ -144,7 +176,7 @@ impl Drone {
             drone_size: 0.3,
             x: 0.0, y: 2.0, z: 0.0,
             vx: 0.0, vy: 0.0, vz: 0.0,
-            orientation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            orientation: ned_identity(),
             pitch_rate: 0.0, roll_rate: 0.0, yaw_rate: 0.0,
             pitch: 0.0, roll: 0.0, yaw: 0.0,
             body_pitch: 0.0, body_roll: 0.0,
@@ -206,7 +238,7 @@ impl Drone {
     pub fn reset_to_spawn(&mut self) {
         self.x = self.spawn_x; self.y = self.spawn_y; self.z = self.spawn_z;
         self.vx = 0.0; self.vy = 0.0; self.vz = 0.0;
-        self.orientation = Quaternion::new(1.0, 0.0, 0.0, 0.0);
+        self.orientation = ned_identity();
         self.pitch_rate = 0.0; self.roll_rate = 0.0; self.yaw_rate = 0.0;
         self.pitch = 0.0; self.roll = 0.0; self.yaw = 0.0;
         self.is_colliding = false;
@@ -257,16 +289,27 @@ impl Drone {
         }
 
         // Extract rotation matrix from orientation
+        // With left-multiply integration (q_dot = omega*q*0.5), Matrix3 ROWS are body axes in world.
         let rot = Matrix3::from(self.orientation);
-        let up = rot.y; // local +Y column
+        // Thrust direction = body -Z in world = -(row 2) = -(rot.x.z, rot.y.z, rot.z.z)
+        let thrust_dir = Vector3::new(-rot.x.z, -rot.y.z, -rot.z.z);
 
-        // Forces: thrust along local up + gravity + quadratic drag
+        // Debug: log thrust direction on first few frames
+        static DEBUG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let c = DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if c < 5 || (c % 300 == 0 && self.thrust_output > 0.1) {
+            log::info!("thrust_dir=({:.2},{:.2},{:.2}) thrust_out={:.1} pos=({:.2},{:.2},{:.2}) vy={:.2}",
+                thrust_dir.x, thrust_dir.y, thrust_dir.z, self.thrust_output,
+                self.x, self.y, self.z, self.vy);
+        }
+
+        // Forces: thrust along body -Z + gravity + quadratic drag
         let mass_g = self.mass.max(1.0);
         let mass_kg = mass_g / 1000.0;
         let thrust_accel = (self.thrust_output / mass_g) * G;
-        let mut ax = up.x * thrust_accel;
-        let mut ay = up.y * thrust_accel - G;
-        let mut az = up.z * thrust_accel;
+        let mut ax = thrust_dir.x * thrust_accel;
+        let mut ay = thrust_dir.y * thrust_accel;
+        let mut az = thrust_dir.z * thrust_accel - G;
 
         // Quadratic drag
         let spd = (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz).sqrt();
@@ -295,8 +338,8 @@ impl Drone {
 
         // Derive euler angles for HUD
         self.update_euler_from_quat();
-        self.speed = (self.vx * self.vx + self.vz * self.vz).sqrt();
-        self.vertical_speed = self.vy;
+        self.speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
+        self.vertical_speed = self.vz;
     }
 
     /// Apply collision response from external collision system.
@@ -329,20 +372,29 @@ impl Drone {
 
     // ---- Camera ----
 
+    /// body→cam rotation (applied as LEFT multiply).
+    /// Maps: body+X→cam+Z, body+Y→cam+X, body+Z→cam+Y
+    /// Used as: cam_orient = CAM_TO_NED * orientation
+    const CAM_TO_NED: Quaternion<f32> = Quaternion::new(0.5, -0.5, -0.5, -0.5);
+
     pub fn camera_transform(&self) -> (Vector3<f32>, Quaternion<f32>) {
         let pos = Vector3::new(self.x, self.y, self.z);
         let rot = Matrix3::from(self.orientation);
-        let forward = -rot.z; // local -Z = forward
+        // With left-multiply integration, rows are body axes in world.
+        // body +X (forward) in world = row 0 = (rot.x.x, rot.y.x, rot.z.x)
+        let forward = Vector3::new(rot.x.x, rot.y.x, rot.z.x);
         let half_size = self.drone_size * 0.5;
 
-        // Camera mount pitch offset (body-frame X rotation)
+        // Camera mount pitch offset (body-frame Y rotation in NED = pitch axis)
         let mount_deg = match self.flight_mode {
             FlightMode::Fpv => self.camera_mount_angle,
             FlightMode::Drone => self.camera_tilt_angle,
         };
         let mount_rad = mount_deg * DEG2RAD;
-        let tilt_q = Quaternion::from_axis_angle(Vector3::unit_x(), Rad(mount_rad));
-        let cam_orient = self.orientation * tilt_q;
+        // In NED, pitch is around body Y axis. Positive mount angle tilts camera up (nose up).
+        let tilt_q = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(mount_rad));
+        // Apply tilt in body frame, then left-multiply by body→cam rotation
+        let cam_orient = Self::CAM_TO_NED * self.orientation * tilt_q;
 
         let cam_pos = pos + forward * half_size;
         (cam_pos, cam_orient)
@@ -350,51 +402,87 @@ impl Drone {
 
     // ---- Orientation helpers ----
 
+    /// Quaternion rate integration: q̇ = ½ (-ω) ⊗ q, q_{k+1} = normalize(q + q̇·dt)
+    /// `omega` is body-frame angular velocity in rad/s: [ω_x(roll), ω_y(pitch), ω_z(yaw)]
+    /// Empirically verified directions (with left-multiply and negation):
+    ///   ω_x > 0 → roll right (body+Y wing down)
+    ///   ω_y > 0 → pitch up (nose up, body_pitch increases)
+    ///   ω_z > 0 → yaw right (nose toward body+Y)
+    fn integrate_orientation(&mut self, omega_x: f32, omega_y: f32, omega_z: f32, dt: f32) {
+        let q = self.orientation;
+        // q̇ = ½ (-ω) ⊗ q (left-multiply with negated omega for correct body-frame rotation)
+        let omega_q = Quaternion::new(0.0, -omega_x, -omega_y, -omega_z);
+        let q_dot = omega_q * q * 0.5;
+        // First-order Euler integration
+        let q_new = Quaternion::new(
+            q.s + q_dot.s * dt,
+            q.v.x + q_dot.v.x * dt,
+            q.v.y + q_dot.v.y * dt,
+            q.v.z + q_dot.v.z * dt,
+        );
+        self.orientation = q_new.normalize();
+    }
+
+    /// Legacy: apply a single-axis body-frame rotation (kept for potential future use)
+    #[allow(dead_code)]
     fn apply_body_rotation(&mut self, axis: Vector3<f32>, angle_deg: f32) {
         if angle_deg.abs() < 1e-8 { return; }
         let q = Quaternion::from_axis_angle(axis, Rad(angle_deg * DEG2RAD));
         self.orientation = (self.orientation * q).normalize();
     }
 
-    /// Decompose orientation into yaw (world Y) + body tilt (pitch, roll).
+    /// Decompose orientation into yaw, pitch, roll using gravity reference.
+    /// Uses body axes in world (rows of Matrix3) to compute attitude relative to gravity.
+    /// This method works correctly regardless of yaw angle.
     fn decompose_orientation(&self) -> (f32, f32, f32) {
         let rot = Matrix3::from(self.orientation);
-        let local_z = rot.z; // local +Z in world
+        // With left-multiply integration, ROWS are body axes in world:
+        // row 0 = body+X (forward) in world = (rot.x.x, rot.y.x, rot.z.x)
+        // row 1 = body+Y (right) in world = (rot.x.y, rot.y.y, rot.z.y)
+        // row 2 = body+Z (down) in world = (rot.x.z, rot.y.z, rot.z.z)
+        let fwd = Vector3::new(rot.x.x, rot.y.x, rot.z.x);
+        let right = Vector3::new(rot.x.y, rot.y.y, rot.z.y);
+        let down = Vector3::new(rot.x.z, rot.y.z, rot.z.z);
 
-        let yaw_rad = local_z.x.atan2(local_z.z);
+        // Yaw = heading of forward projected onto world XY plane
+        // At spawn fwd=(0,1,0), yaw=0
+        let yaw_rad = fwd.x.atan2(fwd.y);
         let yaw_deg = yaw_rad * RAD2DEG;
 
-        // Yaw-only quaternion
-        let yaw_q = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(yaw_rad));
-        // Body tilt = inverse(yawQuat) * orientation
-        let tilt_q = yaw_q.invert() * self.orientation;
+        // Pitch = angle between forward and horizontal plane
+        // fwd.z > 0 means nose points up (world +Z = up), so pitch > 0
+        let body_pitch = fwd.z.asin() * RAD2DEG;
 
-        // Extract pitch (X) and roll (Z) from tilt quaternion using euler approximation
-        let tilt_rot = Matrix3::from(tilt_q);
-        let body_pitch = (-tilt_rot.z.y).asin() * RAD2DEG;
-        let body_roll = tilt_rot.z.x.atan2(tilt_rot.z.z) * RAD2DEG;
+        // Roll = angle of body "down" vector away from world "down" (-Z),
+        // measured in the plane perpendicular to the forward direction.
+        // Use the body right vector's Z component: if right.z < 0, right wing is above horizon = roll left
+        // Alternatively: roll = atan2(right.z, -down.z)
+        // When level: right.z=0, down.z=-1 → atan2(0, 1) = 0
+        // When rolled right: right.z<0 (right wing down toward -Z) ... 
+        // Actually in Z-up: down.z < 0 means "down" points toward world-Z = correct down.
+        // right.z: positive = right wing points up, negative = right wing points down
+        // For FPV HUD: right roll (right wing down) should show as positive roll
+        let body_roll = right.z.atan2(-down.z) * RAD2DEG;
 
         (yaw_deg, body_pitch, body_roll)
     }
 
     fn update_euler_from_quat(&mut self) {
-        // Standard euler extraction from quaternion
-        let rot = Matrix3::from(self.orientation);
-        self.pitch = (-rot.z.y).asin() * RAD2DEG;
-        self.yaw = rot.z.x.atan2(rot.z.z) * RAD2DEG;
-        self.roll = rot.x.y.atan2(rot.y.y) * RAD2DEG;
-
-        let (_, bp, br) = self.decompose_orientation();
+        let (yaw, bp, br) = self.decompose_orientation();
+        self.yaw = yaw;
         self.body_pitch = bp;
         self.body_roll = br;
+        self.pitch = bp;
+        self.roll = br;
     }
 
     // ---- Control laws ----
 
     fn on_flight_mode_changed(&mut self) {
+        // Z-up world: target_x = world X, target_z = world Y (horiz), target_y = world Z (alt)
         self.target_x = self.x;
-        self.target_y = self.y;
-        self.target_z = self.z;
+        self.target_z = self.y; // horizontal Y hold
+        self.target_y = self.z; // altitude Z hold
         self.clear_pid_state();
     }
 
@@ -411,172 +499,78 @@ impl Drone {
         let pitch_step = (level_speed * dt).min(body_pitch.abs());
         let roll_step = (level_speed * dt).min(body_roll.abs());
 
-        if pitch_step > 0.01 {
-            self.apply_body_rotation(Vector3::unit_x(), -body_pitch.signum() * pitch_step);
-        }
-        if roll_step > 0.01 {
-            self.apply_body_rotation(Vector3::unit_z(), -body_roll.signum() * roll_step);
-        }
+        // Use angular rates to level, then integrate
+        // Positive body_pitch means nose up → need negative pitch rate to level → but integrate_orientation
+        // negates internally, so we pass positive (same sign as body_pitch to cancel it)
+        let level_pitch_rate = if pitch_step > 0.01 { body_pitch.signum() * level_speed } else { 0.0 };
+        let level_roll_rate = if roll_step > 0.01 { body_roll.signum() * level_speed } else { 0.0 };
+
+        // NED: ω_x = roll, ω_y = pitch, ω_z = yaw
+        let omega_x = level_roll_rate * DEG2RAD;
+        let omega_y = level_pitch_rate * DEG2RAD;
+        let omega_z = self.yaw_rate * DEG2RAD;
+        self.integrate_orientation(omega_x, omega_y, omega_z, dt);
     }
 
     fn control_fpv(&mut self, dt: f32, input: &DroneInput) {
         let boost = if input.boost { 1.5 } else { 1.0 };
         let [rate_r, rate_p, rate_y] = input.rates;
 
-        // Sticks → target angular rates
-        let t_pr = input.pitch * self.max_pitch_rate * rate_p * boost;
+        // Sticks → target angular rates (deg/s)
+        // NED: roll=+1 → right roll (ω_x>0), pitch=+1 → nose up (ω_y>0), yaw=+1 → right (ω_z>0)
         let t_rr = input.roll * self.max_roll_rate * rate_r * boost;
+        let t_pr = input.pitch * self.max_pitch_rate * rate_p * boost;
         let t_yr = input.yaw * self.max_yaw_rate * rate_y * boost;
 
         // Smooth rate tracking
         let s = 1.0 - (-15.0 * dt).exp();
-        self.pitch_rate += (t_pr - self.pitch_rate) * s;
         self.roll_rate += (t_rr - self.roll_rate) * s;
+        self.pitch_rate += (t_pr - self.pitch_rate) * s;
         self.yaw_rate += (t_yr - self.yaw_rate) * s;
 
         // Damp when centered
         let ad = (-self.angular_drag * dt).exp();
-        if input.pitch.abs() < 0.05 { self.pitch_rate *= ad; }
         if input.roll.abs() < 0.05 { self.roll_rate *= ad; }
+        if input.pitch.abs() < 0.05 { self.pitch_rate *= ad; }
         if input.yaw.abs() < 0.05 { self.yaw_rate *= ad; }
 
-        // Apply body-frame rotations
-        self.apply_body_rotation(Vector3::unit_x(), self.pitch_rate * dt);
-        self.apply_body_rotation(Vector3::unit_z(), self.roll_rate * dt);
-        self.apply_body_rotation(Vector3::unit_y(), self.yaw_rate * dt);
+        // Quaternion rate integration: ω in body NED frame (rad/s)
+        // NED body axes: ω_x = roll (around body+X/forward), ω_y = pitch (around body+Y/right), ω_z = yaw (around body+Z/down)
+        let omega_x = self.roll_rate * DEG2RAD;
+        let omega_y = self.pitch_rate * DEG2RAD;
+        let omega_z = self.yaw_rate * DEG2RAD;
+        self.integrate_orientation(omega_x, omega_y, omega_z, dt);
 
         // Throttle → thrust (grams-force)
         self.thrust_output = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
     }
 
+    /// Stabilize mode: roll/pitch sticks → target angle, yaw stick → angular rate.
+    /// input=0 → level flight. Throttle directly controls thrust.
     fn control_drone(&mut self, dt: f32, input: &DroneInput) {
         let boost = if input.boost { 1.5 } else { 1.0 };
         let [rate_r, rate_p, rate_y] = input.rates;
-        let max_spd = self.drone_max_speed * boost;
-
-        // Body-frame forward (-Z) and right (+X) in world XZ plane
-        let rot = Matrix3::from(self.orientation);
-        let fwd_x = -rot.z.x;
-        let fwd_z = -rot.z.z;
-        let right_x = rot.x.x;
-        let right_z = rot.x.z;
-
-        let horiz_active = input.pitch.abs() > 0.05 || input.roll.abs() > 0.05;
-        let vert_active = input.throttle.abs() > 0.05;
+        let max_angle = self.drone_max_angle;
         let yaw_active = input.yaw.abs() > 0.05;
 
-        // ---- Horizontal ----
-        let (v_des_x, v_des_z);
-        if horiz_active {
-            let cmd_fwd = -input.pitch * max_spd * rate_p;
-            let cmd_right = input.roll * max_spd * rate_r;
-            v_des_x = cmd_fwd * fwd_x + cmd_right * right_x;
-            v_des_z = cmd_fwd * fwd_z + cmd_right * right_z;
-            self.target_x = self.x;
-            self.target_z = self.z;
-            self.pos_int_x = 0.0; self.pos_int_z = 0.0;
-            self.filt_pos_derr_x = 0.0; self.filt_pos_derr_z = 0.0;
-            self.prev_pos_err_x = 0.0; self.prev_pos_err_z = 0.0;
-        } else {
-            let pos_err_x = self.target_x - self.x;
-            let pos_err_z = self.target_z - self.z;
-            let pi_max = self.pos_int_max;
-            self.pos_int_x = clamp(self.pos_int_x + pos_err_x * dt, -pi_max, pi_max);
-            self.pos_int_z = clamp(self.pos_int_z + pos_err_z * dt, -pi_max, pi_max);
-            let d_alpha = 1.0 - (-20.0 * dt).exp();
-            let raw_x = if dt > 0.0 { (pos_err_x - self.prev_pos_err_x) / dt } else { 0.0 };
-            let raw_z = if dt > 0.0 { (pos_err_z - self.prev_pos_err_z) / dt } else { 0.0 };
-            self.filt_pos_derr_x += (raw_x - self.filt_pos_derr_x) * d_alpha;
-            self.filt_pos_derr_z += (raw_z - self.filt_pos_derr_z) * d_alpha;
-            self.prev_pos_err_x = pos_err_x;
-            self.prev_pos_err_z = pos_err_z;
-            v_des_x = self.drone_pos_kp * pos_err_x + self.drone_pos_ki * self.pos_int_x + self.drone_pos_kd * self.filt_pos_derr_x;
-            v_des_z = self.drone_pos_kp * pos_err_z + self.drone_pos_ki * self.pos_int_z + self.drone_pos_kd * self.filt_pos_derr_z;
-        }
+        // ---- 1. Sticks → target tilt angles (degrees) ----
+        // Positive input.pitch → nose up (same direction as FPV)
+        let target_pitch = input.pitch * max_angle * rate_p;
+        // Positive input.roll → roll right (same direction as FPV)
+        let target_roll = -input.roll * max_angle * rate_r;
 
-        // ---- Vertical ----
-        let v_des_y;
-        if vert_active {
-            v_des_y = input.throttle * self.drone_max_vspeed * boost;
-            self.target_y = self.y;
-            self.pos_int_y = 0.0;
-            self.filt_pos_derr_y = 0.0;
-            self.prev_pos_err_y = 0.0;
-        } else {
-            let pos_err_y = self.target_y - self.y;
-            let pi_max = self.pos_int_max;
-            self.pos_int_y = clamp(self.pos_int_y + pos_err_y * dt, -pi_max, pi_max);
-            let d_alpha = 1.0 - (-20.0 * dt).exp();
-            let raw_y = if dt > 0.0 { (pos_err_y - self.prev_pos_err_y) / dt } else { 0.0 };
-            self.filt_pos_derr_y += (raw_y - self.filt_pos_derr_y) * d_alpha;
-            self.prev_pos_err_y = pos_err_y;
-            v_des_y = self.drone_alt_kp * pos_err_y + self.drone_alt_ki * self.pos_int_y + self.drone_alt_kd * self.filt_pos_derr_y;
-        }
-
-        // Clamp desired velocity
-        let v_des_h = (v_des_x * v_des_x + v_des_z * v_des_z).sqrt();
-        let (v_des_x, v_des_z) = if v_des_h > max_spd {
-            let s = max_spd / v_des_h;
-            (v_des_x * s, v_des_z * s)
-        } else {
-            (v_des_x, v_des_z)
-        };
-        let v_des_y = clamp(v_des_y, -self.drone_max_vspeed * boost, self.drone_max_vspeed * boost);
-
-        // ---- Inner loop: velocity PID → tilt angles ----
-        let max_angle = self.drone_max_angle;
-        let a_max_horiz = G * (max_angle * DEG2RAD).tan();
-        let vel_err_clamp = a_max_horiz / self.drone_vel_kp;
-
-        let vel_err_x = clamp(v_des_x - self.vx, -vel_err_clamp, vel_err_clamp);
-        let vel_err_y = v_des_y - self.vy;
-        let vel_err_z = clamp(v_des_z - self.vz, -vel_err_clamp, vel_err_clamp);
-
-        let vi_max = self.vel_int_max;
-        self.vel_int_x = clamp(self.vel_int_x + vel_err_x * dt, -vi_max, vi_max);
-        self.vel_int_y = clamp(self.vel_int_y + vel_err_y * dt, -vi_max, vi_max);
-        self.vel_int_z = clamp(self.vel_int_z + vel_err_z * dt, -vi_max, vi_max);
-
-        let vd_alpha = 1.0 - (-15.0 * dt).exp();
-        let raw_vx = if dt > 0.0 { (vel_err_x - self.prev_vel_err_x) / dt } else { 0.0 };
-        let raw_vy = if dt > 0.0 { (vel_err_y - self.prev_vel_err_y) / dt } else { 0.0 };
-        let raw_vz = if dt > 0.0 { (vel_err_z - self.prev_vel_err_z) / dt } else { 0.0 };
-        self.filt_vel_derr_x += (raw_vx - self.filt_vel_derr_x) * vd_alpha;
-        self.filt_vel_derr_y += (raw_vy - self.filt_vel_derr_y) * vd_alpha;
-        self.filt_vel_derr_z += (raw_vz - self.filt_vel_derr_z) * vd_alpha;
-        self.prev_vel_err_x = vel_err_x;
-        self.prev_vel_err_y = vel_err_y;
-        self.prev_vel_err_z = vel_err_z;
-
-        // Desired world-frame horizontal acceleration
-        let a_des_x = self.drone_vel_kp * vel_err_x + self.drone_vel_ki * self.vel_int_x + self.drone_vel_kd * self.filt_vel_derr_x;
-        let a_des_z = self.drone_vel_kp * vel_err_z + self.drone_vel_ki * self.vel_int_z + self.drone_vel_kd * self.filt_vel_derr_z;
-
-        // Project onto body axes
-        let a_fwd = a_des_x * fwd_x + a_des_z * fwd_z;
-        let a_right = a_des_x * right_x + a_des_z * right_z;
-
-        let target_pitch = clamp(-a_fwd / G * RAD2DEG, -max_angle, max_angle);
-        let target_roll = clamp(-a_right / G * RAD2DEG, -max_angle, max_angle);
-
-        let smooth_factor = 1.0 - (-10.0 * dt).exp();
-        self.smooth_target_pitch += (target_pitch - self.smooth_target_pitch) * smooth_factor;
-        self.smooth_target_roll += (target_roll - self.smooth_target_roll) * smooth_factor;
-
-        // Attitude P-controller
+        // ---- 2. Attitude P-controller ----
         let (_, body_pitch_deg, body_roll_deg) = self.decompose_orientation();
-        let pitch_err = self.smooth_target_pitch - body_pitch_deg;
-        let roll_err = self.smooth_target_roll - body_roll_deg;
-        let max_step = self.drone_angle_rate * dt;
-        let dpitch = clamp(pitch_err, -max_step, max_step);
-        let droll = clamp(roll_err, -max_step, max_step);
+        // pitch_rate>0 → nose up → body_pitch increases. So err = target-current for convergence.
+        let pitch_err = target_pitch - body_pitch_deg;
+        // roll_rate>0 → body_roll decreases. So err = current-target for convergence.
+        let roll_err = body_roll_deg - target_roll;
 
-        self.apply_body_rotation(Vector3::unit_x(), dpitch);
-        self.apply_body_rotation(Vector3::unit_z(), droll);
-        self.pitch_rate = pitch_err * 5.0;
-        self.roll_rate = roll_err * 5.0;
+        let max_rate = 60.0; // deg/s max correction rate (conservative for stability)
+        self.pitch_rate = clamp(pitch_err * 3.0, -max_rate, max_rate);
+        self.roll_rate = clamp(roll_err * 3.0, -max_rate, max_rate);
 
-        // Yaw: pure rate control
+        // ---- 3. Yaw: pure rate control ----
         let drone_yaw_max = self.drone_max_yaw_rate * rate_y * boost;
         let t_yr = input.yaw * drone_yaw_max;
         let ys = 1.0 - (-15.0 * dt).exp();
@@ -584,17 +578,19 @@ impl Drone {
         if !yaw_active {
             self.yaw_rate *= (-self.angular_drag * dt).exp();
         }
-        self.apply_body_rotation(Vector3::unit_y(), self.yaw_rate * dt);
 
-        // Altitude PID → thrust (grams-force)
-        let a_des_y = self.drone_vel_kp * vel_err_y + self.drone_vel_ki * self.vel_int_y + self.drone_vel_kd * self.filt_vel_derr_y;
-        let mut cmd_gf = self.mass * (G + a_des_y) / G;
+        // ---- 4. Integrate orientation ----
+        // Same as FPV: pass rates directly, integrate_orientation handles negation internally
+        let omega_x = self.roll_rate * DEG2RAD;
+        let omega_y = self.pitch_rate * DEG2RAD;
+        let omega_z = self.yaw_rate * DEG2RAD;
+        self.integrate_orientation(omega_x, omega_y, omega_z, dt);
 
-        // Tilt compensation
-        let rot2 = Matrix3::from(self.orientation);
-        let cos_t = rot2.y.y.max(0.1);
-        cmd_gf /= cos_t;
-
-        self.thrust_output = clamp(cmd_gf, 0.0, self.max_thrust * boost);
+        // ---- 5. Throttle → thrust with tilt compensation ----
+        let thrust_base = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
+        let rot = Matrix3::from(self.orientation);
+        // cos(tilt) = thrust_dir dot world_up = -row2.z
+        let cos_t = (-rot.z.z).max(0.1);
+        self.thrust_output = clamp(thrust_base / cos_t, 0.0, self.max_thrust * boost);
     }
 }
