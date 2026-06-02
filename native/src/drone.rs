@@ -6,26 +6,25 @@
 ///   +Z = Down
 ///   Thrust direction = body -Z (upward)
 ///
-/// World coordinate system (Z-up, matching 3DGS field scene):
-///   +Z = Up, gravity along -Z
-///   XY = horizontal plane
+/// World coordinate systems:
+///   Z-up: +Z = Up, gravity along -Z, horizontal plane = XY
+///   COLMAP: +Y = Down, gravity along +Y, horizontal plane = XZ
 ///
-/// `orientation` quaternion: with left-multiply integration (q_dot = -ω⊗q/2),
+/// `orientation` quaternion: with integration formula q̇ = ½ (-ω) ⊗ q (left-multiply),
 /// Matrix3::from(orientation) ROWS are body axes expressed in world coordinates.
 ///
 /// Initial orientation (spawn, see `ned_identity()`):
-///   body +X (forward) → world +Y
-///   body +Y (right)   → world +X
-///   body +Z (down)    → world -Z
+///   Z-up:   body+X→world+Y, body+Y→world+X, body+Z→world-Z
+///   COLMAP: body+X→world+X, body+Y→world(0,0,-1), body+Z→world+Y
 ///
-/// Camera transform: cam_orient = CAM_TO_NED * orientation * tilt_q (left-multiply)
+/// Heading rotation uses RIGHT-multiply `orientation * yaw_q` (body-frame yaw),
+/// which preserves the thrust direction (body+Z in world).
+///
+/// Camera transform: cam_orient = CAM_TO_NED * orientation * tilt_q
 ///   CAM_TO_NED maps body axes to COLMAP camera axes (X-right, Y-down, Z-front).
 ///
-/// Rotation update: q̇ = ½ (-ω) ⊗ q,  q_{k+1} = normalize(q_k + q̇·dt)
-///   where ω = (roll_rate, pitch_rate, yaw_rate) in body NED frame.
-///
 /// FPV:   sticks → body-frame angular rates, throttle → thrust, no self-leveling
-/// Drone: sticks → velocity command → position setpoint, cascaded PID
+/// Drone: sticks → target angle, P-controller, tilt compensation
 
 use cgmath::{InnerSpace, Matrix3, Quaternion, Rad, Rotation, Rotation3, Vector3};
 
@@ -263,20 +262,20 @@ impl Drone {
     /// Called after reset_to_spawn to set the initial facing direction.
     pub fn apply_spawn_heading(&mut self, heading_deg: f32) {
         if heading_deg.abs() < 0.01 { return; }
-        match self.world_up {
-            crate::app_state::WorldUp::Zup => {
-                // Z-up: left-multiply rotates body axes in world frame.
-                // Orbit CW = positive yaw, right-hand +Z = CCW → negate angle.
-                let yaw_q = Quaternion::from_axis_angle(Vector3::unit_z(), Rad(-heading_deg * DEG2RAD));
-                self.orientation = (yaw_q * self.orientation).normalize();
-            }
-            crate::app_state::WorldUp::Colmap => {
-                // COLMAP: right-multiply keeps body+Z (down) in world Y-axis.
-                // Positive heading rotates forward from +X toward +Z (matching orbit yaw).
-                let yaw_q = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(heading_deg * DEG2RAD));
-                self.orientation = (self.orientation * yaw_q).normalize();
-            }
-        }
+        // Right-multiply: body-frame rotation that keeps thrust axis unchanged.
+        // Axis is the body-local "down" axis (body+Z in NED), which maps to world up.
+        // For both Z-up and COLMAP, from_axis_angle uses the NED body+Z direction
+        // projected into the appropriate world axis.
+        let yaw_q = match self.world_up {
+            // Z-up: body+Z → world-Z. Rotate around +Z in body = world-Z direction.
+            // Positive heading = CW from above = right-hand around +Z in body frame.
+            crate::app_state::WorldUp::Zup =>
+                Quaternion::from_axis_angle(Vector3::unit_z(), Rad(heading_deg * DEG2RAD)),
+            // COLMAP: body+Z → world+Y. Rotate around body+Y maps to world heading rotation.
+            crate::app_state::WorldUp::Colmap =>
+                Quaternion::from_axis_angle(Vector3::unit_y(), Rad(heading_deg * DEG2RAD)),
+        };
+        self.orientation = (self.orientation * yaw_q).normalize();
     }
 
     pub fn reset(&mut self, x: f32, y: f32, z: f32) {
