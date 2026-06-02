@@ -217,6 +217,29 @@ pub fn save_controller_mapping(ctrl: &crate::input::Controller) -> anyhow::Resul
     Ok(())
 }
 
+/// Save per-scene config (world_up, spawn, heading).
+pub fn save_scene_config(scene_key: &str, config: &crate::app_state::SceneConfig) -> anyhow::Result<()> {
+    ensure_config_dir();
+    let path = config_dir().join("scenes.json");
+    let mut map: std::collections::HashMap<String, crate::app_state::SceneConfig> =
+        std::fs::read_to_string(&path).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    map.insert(scene_key.to_string(), config.clone());
+    let json = serde_json::to_string_pretty(&map)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+/// Load per-scene config (returns default if not found).
+pub fn load_scene_config(scene_key: &str) -> crate::app_state::SceneConfig {
+    let path = config_dir().join("scenes.json");
+    std::fs::read_to_string(path).ok()
+        .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, crate::app_state::SceneConfig>>(&s).ok())
+        .and_then(|map| map.get(scene_key).cloned())
+        .unwrap_or_default()
+}
+
 /// Load controller mapping from disk.
 pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
     if let Ok(json) = std::fs::read_to_string(config_dir().join("mapping.json")) {

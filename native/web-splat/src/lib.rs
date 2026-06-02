@@ -888,6 +888,62 @@ impl SceneState {
         })
     }
 
+    /// Create SceneState from an already-parsed point cloud (fast, GPU-only work).
+    pub async fn load_from_raw(gpu: &AppGpu, pc_raw: io::GenericGaussianPointCloud) -> anyhow::Result<Self> {
+        let device = gpu.device();
+        let queue = gpu.queue();
+        let render_format = wgpu::TextureFormat::Rgba8Unorm;
+
+        let pc = PointCloud::new(device, pc_raw)?;
+        log::info!("loaded point cloud with {} points", pc.num_points());
+
+        let renderer = GaussianRenderer::new(device, queue, render_format, pc.sh_deg(), pc.compressed()).await;
+
+        let display = renderer::Display::new(
+            device,
+            render_format,
+            gpu.config.format.remove_srgb_suffix(),
+            gpu.config.width,
+            gpu.config.height,
+        );
+
+        let aabb = pc.bbox();
+        let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
+        let view_camera = PerspectiveCamera::new(
+            aabb.center() - Vector3::new(1., 1., 1.) * aabb.radius() * 0.5,
+            Quaternion::one(),
+            PerspectiveProjection::new(
+                Vector2::new(gpu.config.width, gpu.config.height),
+                Vector2::new(Deg(45.), Deg(45. / aspect)),
+                0.01,
+                1000.,
+            ),
+        );
+
+        let stopwatch = None;
+
+        Ok(Self {
+            pc,
+            renderer,
+            display,
+            splatting_args: SplattingArgs {
+                camera: view_camera,
+                viewport: Vector2::new(gpu.config.width, gpu.config.height),
+                gaussian_scaling: 1.,
+                max_sh_deg: 3,
+                mip_splatting: None,
+                kernel_size: None,
+                clipping_box: None,
+                walltime: Duration::ZERO,
+                scene_center: None,
+                scene_extend: None,
+                background_color: wgpu::Color::BLACK,
+            },
+            stopwatch,
+            pointcloud_file_path: None,
+        })
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.display.resize(device, width, height);
         self.splatting_args.viewport = Vector2::new(width, height);

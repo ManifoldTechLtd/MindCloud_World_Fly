@@ -38,18 +38,20 @@ fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
     v.max(lo).min(hi)
 }
 
-/// Returns the quaternion that maps NED body axes to the Z-up world at spawn:
-///   body +X (forward) → world +Y
-///   body +Y (right)   → world +X
-///   body +Z (down)    → world -Z
-/// Thrust (body -Z) maps to world +Z (up). This is a proper rotation (det=+1).
-fn ned_identity() -> Quaternion<f32> {
-    // Matrix columns (cgmath: col_i = where body axis i maps in world):
-    //   col0 = (0, 1, 0)   [body+X → world+Y]
-    //   col1 = (1, 0, 0)   [body+Y → world+X]
-    //   col2 = (0, 0, -1)  [body+Z → world-Z]
-    // Quaternion: (w=0, x=√2/2, y=√2/2, z=0)
-    Quaternion::new(0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0)
+/// Returns the spawn orientation quaternion for the given world coordinate system.
+fn ned_identity(world_up: crate::app_state::WorldUp) -> Quaternion<f32> {
+    match world_up {
+        crate::app_state::WorldUp::Zup => {
+            // body+X→world+Y, body+Y→world+X, body+Z→world-Z
+            // Thrust (body -Z) → world +Z (up)
+            Quaternion::new(0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0)
+        }
+        crate::app_state::WorldUp::Colmap => {
+            // body+X→world(0,0,-1), body+Y→world(-1,0,0), body+Z→world(0,1,0)
+            // Thrust (body -Z) → world -Y (up in COLMAP where +Y=down)
+            Quaternion::new(0.5, -0.5, 0.5, 0.5)
+        }
+    }
 }
 
 // ---- Flight mode ----
@@ -109,6 +111,9 @@ pub struct Drone {
     /// Yaw-independent body tilt for OSD artificial horizon
     pub body_pitch: f32,
     pub body_roll: f32,
+
+    // ---- World coordinate system ----
+    pub world_up: crate::app_state::WorldUp,
 
     // ---- Tunable parameters ----
     pub flight_mode: FlightMode,
@@ -176,10 +181,12 @@ impl Drone {
             drone_size: 0.3,
             x: 0.0, y: 2.0, z: 0.0,
             vx: 0.0, vy: 0.0, vz: 0.0,
-            orientation: ned_identity(),
+            orientation: ned_identity(crate::app_state::WorldUp::Zup),
             pitch_rate: 0.0, roll_rate: 0.0, yaw_rate: 0.0,
             pitch: 0.0, roll: 0.0, yaw: 0.0,
             body_pitch: 0.0, body_roll: 0.0,
+
+            world_up: crate::app_state::WorldUp::Zup,
 
             flight_mode: FlightMode::Fpv,
             prev_flight_mode: FlightMode::Fpv,
@@ -238,7 +245,7 @@ impl Drone {
     pub fn reset_to_spawn(&mut self) {
         self.x = self.spawn_x; self.y = self.spawn_y; self.z = self.spawn_z;
         self.vx = 0.0; self.vy = 0.0; self.vz = 0.0;
-        self.orientation = ned_identity();
+        self.orientation = ned_identity(self.world_up);
         self.pitch_rate = 0.0; self.roll_rate = 0.0; self.yaw_rate = 0.0;
         self.pitch = 0.0; self.roll = 0.0; self.yaw = 0.0;
         self.is_colliding = false;
@@ -246,6 +253,19 @@ impl Drone {
         self.thrust_output = 0.0;
         self.target_x = self.spawn_x; self.target_y = self.spawn_y; self.target_z = self.spawn_z;
         self.clear_pid_state();
+    }
+
+    /// Rotate the current orientation by heading_deg around the world up axis.
+    /// Called after reset_to_spawn to set the initial facing direction.
+    pub fn apply_spawn_heading(&mut self, heading_deg: f32) {
+        if heading_deg.abs() < 0.01 { return; }
+        let up_axis = match self.world_up {
+            crate::app_state::WorldUp::Zup => Vector3::unit_z(),
+            crate::app_state::WorldUp::Colmap => -Vector3::unit_y(), // world up = -Y
+        };
+        // Left-multiply: world-frame rotation around up axis
+        let yaw_q = Quaternion::from_axis_angle(up_axis, Rad(heading_deg * DEG2RAD));
+        self.orientation = (yaw_q * self.orientation).normalize();
     }
 
     pub fn reset(&mut self, x: f32, y: f32, z: f32) {
@@ -309,7 +329,12 @@ impl Drone {
         let thrust_accel = (self.thrust_output / mass_g) * G;
         let mut ax = thrust_dir.x * thrust_accel;
         let mut ay = thrust_dir.y * thrust_accel;
-        let mut az = thrust_dir.z * thrust_accel - G;
+        let mut az = thrust_dir.z * thrust_accel;
+        // Gravity along world down axis
+        match self.world_up {
+            crate::app_state::WorldUp::Zup => { az -= G; }     // gravity = (0, 0, -G)
+            crate::app_state::WorldUp::Colmap => { ay += G; }  // gravity = (0, +G, 0), +Y = down
+        }
 
         // Quadratic drag
         let spd = (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz).sqrt();
@@ -338,8 +363,16 @@ impl Drone {
 
         // Derive euler angles for HUD
         self.update_euler_from_quat();
-        self.speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
-        self.vertical_speed = self.vz;
+        match self.world_up {
+            crate::app_state::WorldUp::Zup => {
+                self.speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
+                self.vertical_speed = self.vz;
+            }
+            crate::app_state::WorldUp::Colmap => {
+                self.speed = (self.vx * self.vx + self.vz * self.vz).sqrt();
+                self.vertical_speed = -self.vy; // -vy because +Y=down
+            }
+        }
     }
 
     /// Apply collision response from external collision system.
@@ -437,34 +470,26 @@ impl Drone {
     fn decompose_orientation(&self) -> (f32, f32, f32) {
         let rot = Matrix3::from(self.orientation);
         // With left-multiply integration, ROWS are body axes in world:
-        // row 0 = body+X (forward) in world = (rot.x.x, rot.y.x, rot.z.x)
-        // row 1 = body+Y (right) in world = (rot.x.y, rot.y.y, rot.z.y)
-        // row 2 = body+Z (down) in world = (rot.x.z, rot.y.z, rot.z.z)
-        let fwd = Vector3::new(rot.x.x, rot.y.x, rot.z.x);
-        let right = Vector3::new(rot.x.y, rot.y.y, rot.z.y);
-        let down = Vector3::new(rot.x.z, rot.y.z, rot.z.z);
+        let fwd = Vector3::new(rot.x.x, rot.y.x, rot.z.x);   // row 0 = body+X (forward)
+        let right = Vector3::new(rot.x.y, rot.y.y, rot.z.y);  // row 1 = body+Y (right)
+        let down = Vector3::new(rot.x.z, rot.y.z, rot.z.z);   // row 2 = body+Z (down)
 
-        // Yaw = heading of forward projected onto world XY plane
-        // At spawn fwd=(0,1,0), yaw=0
-        let yaw_rad = fwd.x.atan2(fwd.y);
-        let yaw_deg = yaw_rad * RAD2DEG;
-
-        // Pitch = angle between forward and horizontal plane
-        // fwd.z > 0 means nose points up (world +Z = up), so pitch > 0
-        let body_pitch = fwd.z.asin() * RAD2DEG;
-
-        // Roll = angle of body "down" vector away from world "down" (-Z),
-        // measured in the plane perpendicular to the forward direction.
-        // Use the body right vector's Z component: if right.z < 0, right wing is above horizon = roll left
-        // Alternatively: roll = atan2(right.z, -down.z)
-        // When level: right.z=0, down.z=-1 → atan2(0, 1) = 0
-        // When rolled right: right.z<0 (right wing down toward -Z) ... 
-        // Actually in Z-up: down.z < 0 means "down" points toward world-Z = correct down.
-        // right.z: positive = right wing points up, negative = right wing points down
-        // For FPV HUD: right roll (right wing down) should show as positive roll
-        let body_roll = right.z.atan2(-down.z) * RAD2DEG;
-
-        (yaw_deg, body_pitch, body_roll)
+        match self.world_up {
+            crate::app_state::WorldUp::Zup => {
+                // Horizontal = XY, vertical = Z. At spawn fwd=(0,1,0).
+                let yaw_deg = fwd.x.atan2(fwd.y) * RAD2DEG;
+                let body_pitch = fwd.z.asin() * RAD2DEG;
+                let body_roll = right.z.atan2(-down.z) * RAD2DEG;
+                (yaw_deg, body_pitch, body_roll)
+            }
+            crate::app_state::WorldUp::Colmap => {
+                // Horizontal = XZ, vertical = -Y (+Y=down). At spawn fwd=(0,0,-1).
+                let yaw_deg = fwd.x.atan2(-fwd.z) * RAD2DEG;
+                let body_pitch = (-fwd.y).asin() * RAD2DEG;  // -fwd.y because +Y=down
+                let body_roll = (-right.y).atan2(down.y) * RAD2DEG;
+                (yaw_deg, body_pitch, body_roll)
+            }
+        }
     }
 
     fn update_euler_from_quat(&mut self) {
@@ -589,8 +614,12 @@ impl Drone {
         // ---- 5. Throttle → thrust with tilt compensation ----
         let thrust_base = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
         let rot = Matrix3::from(self.orientation);
-        // cos(tilt) = thrust_dir dot world_up = -row2.z
-        let cos_t = (-rot.z.z).max(0.1);
+        // cos(tilt) = dot(thrust_dir, world_up)
+        // thrust_dir = -(row 2) = -(rot.x.z, rot.y.z, rot.z.z)
+        let cos_t = match self.world_up {
+            crate::app_state::WorldUp::Zup => (-rot.z.z).max(0.1),     // world_up=(0,0,1)
+            crate::app_state::WorldUp::Colmap => (rot.y.z).max(0.1),   // world_up=(0,-1,0), dot with -(rot.x.z,rot.y.z,rot.z.z) = rot.y.z
+        };
         self.thrust_output = clamp(thrust_base / cos_t, 0.0, self.max_thrust * boost);
     }
 }

@@ -45,8 +45,8 @@ pub fn draw_mode_select(ctx: &egui::Context) -> StateTransition {
     transition
 }
 
-/// Draw scene selection screen.
-pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: GameMode) -> StateTransition {
+/// Draw scene selection screen. `selected` is the index of the highlighted scene (None = nothing selected).
+pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: GameMode, selected: &mut Option<usize>) -> StateTransition {
     let mut transition = StateTransition::None;
     let mode_label = match mode { GameMode::SinglePlayer => "Single Player", GameMode::SplitScreen => "Split Screen" };
 
@@ -61,12 +61,17 @@ pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: Gam
                 ui.add_space(20.0);
 
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for path in scene_files {
+                    for (i, path) in scene_files.iter().enumerate() {
                         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                         let size = std::fs::metadata(path).map(|m| format!("{:.0} MB", m.len() as f64 / 1_000_000.0)).unwrap_or_default();
+                        let is_selected = *selected == Some(i);
+                        let text_color = if is_selected { Color32::WHITE } else { Color32::from_rgb(180, 200, 220) };
+                        let bg = if is_selected { Color32::from_rgb(40, 60, 120) } else { Color32::TRANSPARENT };
+
                         ui.horizontal(|ui| {
-                            if ui.button(RichText::new(&name).size(15.0).color(Color32::from_rgb(180, 200, 220))).clicked() {
-                                transition = StateTransition::ToLoading(path.clone(), mode);
+                            let btn = egui::Button::new(RichText::new(&name).size(15.0).color(text_color)).fill(bg);
+                            if ui.add(btn).clicked() {
+                                *selected = Some(i);
                             }
                             ui.label(RichText::new(&size).size(11.0).color(Color32::GRAY));
                         });
@@ -75,6 +80,21 @@ pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: Gam
                 });
 
                 ui.add_space(15.0);
+
+                // Load Scene button (only enabled when a scene is selected)
+                let load_enabled = selected.is_some();
+                let load_btn = egui::Button::new(
+                    RichText::new("  Load Scene  ").size(16.0).color(if load_enabled { Color32::WHITE } else { Color32::from_rgb(80, 80, 80) })
+                ).fill(if load_enabled { Color32::from_rgb(40, 100, 60) } else { Color32::from_rgb(30, 30, 30) });
+                if ui.add_enabled(load_enabled, load_btn).clicked() {
+                    if let Some(idx) = *selected {
+                        if let Some(path) = scene_files.get(idx) {
+                            transition = StateTransition::ToLoading(path.clone(), mode);
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
                 if ui.button(RichText::new("Browse for file...").size(13.0).color(Color32::from_rgb(100, 180, 255))).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_title("Select a Gaussian Splat scene")
@@ -147,6 +167,20 @@ pub fn draw_exit_confirm(ctx: &egui::Context, show: &mut bool, in_game: bool) ->
             });
     }
     action
+}
+
+/// Draw loading screen with filename.
+pub fn draw_loading_screen(ctx: &egui::Context, filename: &str) {
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 18, 28)))
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.4);
+                ui.label(RichText::new("Loading...").size(28.0).color(Color32::WHITE));
+                ui.add_space(10.0);
+                ui.label(RichText::new(filename).size(13.0).color(Color32::GRAY));
+            });
+        });
 }
 
 /// Scan directories for scene files.

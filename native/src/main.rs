@@ -7,6 +7,7 @@ mod hud;
 mod input;
 mod menu_ui;
 mod persistence;
+mod placement;
 mod scene_mesh;
 mod settings;
 mod spline;
@@ -15,7 +16,7 @@ use std::{fs::File, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 
 use app_state::{GameMode, StateTransition};
 use egui::Color32;
-use cgmath::Point3;
+use cgmath::{InnerSpace, Point3, Rotation, Rotation3};
 use clap::Parser;
 use drone::{Drone, DroneInput};
 use web_splats::{AppGpu, SceneState, SplattingArgs};
@@ -71,11 +72,15 @@ fn apply_drone_cam(scene: &mut SceneState, d: &Drone, dt: Duration) {
 
 enum Phase {
     ModeSelect,
-    SceneSelect { mode: GameMode, scene_files: Vec<PathBuf> },
-    Loading { path: PathBuf, mode: GameMode },
+    SceneSelect { mode: GameMode, scene_files: Vec<PathBuf>, selected: Option<usize> },
+    Loading { path: PathBuf, mode: GameMode,
+              loader: Option<std::thread::JoinHandle<web_splats::io::GenericGaussianPointCloud>> },
+    Placement { mode: GameMode, config: app_state::SceneConfig, scene_path: PathBuf,
+                orbit: placement::OrbitState, input_state: placement::PlacementInputState },
     Playing { drone1:Drone, drone2:Drone, keys1:KeyState, keys2:KeyStateP2,
               armed1:bool, armed2:bool, drone_mode:bool, split:bool,
-              settings_open:bool, controller1:input::Controller },
+              settings_open:bool, controller1:input::Controller,
+              world_up: app_state::WorldUp },
 }
 
 #[pollster::main]
@@ -97,7 +102,7 @@ async fn main() {
     let mut egui_rn = egui_wgpu::Renderer::new(gpu.device(), gpu.config.format, egui_wgpu::RendererOptions::default());
 
     let mut phase = if let Some(ref p) = opt.input {
-        Phase::Loading { path: p.clone(), mode: if opt.split {GameMode::SplitScreen} else {GameMode::SinglePlayer} }
+        Phase::Loading { path: p.clone(), mode: if opt.split {GameMode::SplitScreen} else {GameMode::SinglePlayer}, loader: None }
     } else {
         Phase::ModeSelect
     };
@@ -140,6 +145,12 @@ async fn main() {
                             // Esc: close dialog or open exit dialog
                             if key == KeyCode::Escape && released {
                                 if show_exit_dialog { show_exit_dialog = false; }
+                                else if let Phase::Placement { ref scene_path, ref config, .. } = phase {
+                                    let sk = persistence::scene_key(scene_path);
+                                    let _ = persistence::save_scene_config(&sk, config);
+                                    scene = None; phase = Phase::ModeSelect;
+                                    window.set_title("MindCloud World Fly");
+                                }
                                 else if let Phase::Playing { ref mut settings_open, ref mut controller1, ref mut drone1, .. } = phase {
                                     if *settings_open {
                                         *settings_open = false;
@@ -148,6 +159,11 @@ async fn main() {
                                     }
                                     else { show_exit_dialog = true; }
                                 } else { show_exit_dialog = true; }
+                            }
+
+                            // Placement phase keyboard
+                            if let Phase::Placement { ref mut orbit, .. } = phase {
+                                if pressed { orbit.keys_down.insert(key); } else { orbit.keys_down.remove(&key); }
                             }
 
                             if let Phase::Playing { ref mut keys1, ref mut keys2, ref mut armed1, ref mut armed2,
@@ -194,21 +210,42 @@ async fn main() {
                             }
                         }
                     }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        if let Phase::Placement { ref mut orbit, .. } = phase {
+                            placement::on_mouse_move(orbit, position.x as f32, position.y as f32);
+                        }
+                    }
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        if let Phase::Placement { ref mut orbit, .. } = phase {
+                            if *button == winit::event::MouseButton::Left {
+                                orbit.dragging = *state == ElementState::Pressed;
+                            }
+                        }
+                    }
                     WindowEvent::MouseWheel { delta, .. } => {
-                        // Only orbit mode uses scroll
+                        if let Phase::Placement { ref mut orbit, .. } = phase {
+                            let scroll = match delta {
+                                winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                                winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.01,
+                            };
+                            placement::on_scroll(orbit, scroll);
+                        }
                     }
                     WindowEvent::RedrawRequested => {
                         let now = Instant::now(); let dt = now-last_time; last_time=now; let dt_s=dt.as_secs_f32();
                         gpu.fps = (1./dt_s)*0.05 + gpu.fps*0.95;
+
+                        let mut start_flight = false;
+                        let mut go_back = false;
 
                         match &mut phase {
                             Phase::ModeSelect | Phase::SceneSelect{..} => {
                                 target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(16)));
                                 let raw = egui_st.take_egui_input(&*window);
                                 egui_ctx.begin_pass(raw);
-                                let transition = match &phase {
+                                let transition = match &mut phase {
                                     Phase::ModeSelect => menu_ui::draw_mode_select(&egui_ctx),
-                                    Phase::SceneSelect{mode, scene_files} => menu_ui::draw_scene_select(&egui_ctx, scene_files, *mode),
+                                    Phase::SceneSelect{mode, scene_files, selected} => menu_ui::draw_scene_select(&egui_ctx, scene_files, *mode, selected),
                                     _ => StateTransition::None,
                                 };
                                 match menu_ui::draw_exit_confirm(&egui_ctx, &mut show_exit_dialog, false) {
@@ -236,44 +273,89 @@ async fn main() {
                                 }
                                 match transition {
                                     StateTransition::ToModeSelect => { phase = Phase::ModeSelect; }
-                                    StateTransition::ToSceneSelect(mode) => { phase = Phase::SceneSelect{mode, scene_files: menu_ui::scan_scene_files()}; }
-                                    StateTransition::ToLoading(path, mode) => { phase = Phase::Loading{path, mode}; }
+                                    StateTransition::ToSceneSelect(mode) => { phase = Phase::SceneSelect{mode, scene_files: menu_ui::scan_scene_files(), selected: None}; }
+                                    StateTransition::ToLoading(path, mode) => { phase = Phase::Loading{path, mode, loader: None}; }
                                     _ => {}
                                 }
                                 window.request_redraw();
                             }
-                            Phase::Loading { ref path, mode } => {
+                            Phase::Loading { ref path, mode, ref mut loader } => {
                                 let mode = *mode; let split = mode == GameMode::SplitScreen;
                                 let p = path.clone();
                                 window.set_title("MindCloud Fly - Loading...");
                                 if split { let _ = window.request_inner_size(LogicalSize::new(1280u32, 960)); }
+                                target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(100)));
 
-                                let f = File::open(&p).unwrap_or_else(|e|{eprintln!("Failed: {:?}: {}",p,e);std::process::exit(1);});
-                                let mut sc = pollster::block_on(SceneState::load(&gpu, f, false)).unwrap();
-                                sc.pointcloud_file_path = Some(p);
-                                // Resize scene to match current window
-                                let s = window.inner_size();
-                                sc.resize(gpu.device(), s.width.max(1), s.height.max(1));
-                                scene = Some(sc);
+                                // Spawn background thread for file parsing on first frame
+                                if loader.is_none() {
+                                    let path_clone = p.clone();
+                                    *loader = Some(std::thread::spawn(move || {
+                                        let f = File::open(&path_clone).unwrap_or_else(|e| {
+                                            eprintln!("Failed: {:?}: {}", path_clone, e);
+                                            std::process::exit(1);
+                                        });
+                                        web_splats::io::GenericGaussianPointCloud::load(f).unwrap_or_else(|e| {
+                                            eprintln!("Failed to parse scene: {}", e);
+                                            std::process::exit(1);
+                                        })
+                                    }));
+                                }
 
-                                // Create debug axis entities in scene
-                                scene_entities = scene_mesh::create_axis_entities(gpu.device(), 5.0);
+                                // Show loading screen
+                                {
+                                    let raw = egui_st.take_egui_input(&*window);
+                                    egui_ctx.begin_pass(raw);
+                                    let fname = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                    menu_ui::draw_loading_screen(&egui_ctx, &fname);
+                                    let output = egui_ctx.end_pass();
+                                    egui_st.handle_platform_output(&*window, output.platform_output.clone());
+                                    if let wgpu::CurrentSurfaceTexture::Success(frame)|wgpu::CurrentSurfaceTexture::Suboptimal(frame) = gpu.surface.get_current_texture() {
+                                        let view = frame.texture.create_view(&Default::default());
+                                        let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:None});
+                                        let screen = egui_wgpu::ScreenDescriptor{size_in_pixels:[gpu.config.width,gpu.config.height],pixels_per_point:window.scale_factor() as f32};
+                                        let tris = egui_ctx.tessellate(output.shapes, output.pixels_per_point);
+                                        for(id,d) in &output.textures_delta.set { egui_rn.update_texture(gpu.device(),gpu.queue(),*id,d); }
+                                        egui_rn.update_buffers(gpu.device(),gpu.queue(),&mut enc,&tris,&screen);
+                                        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:None,
+                                            color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view,resolve_target:None,
+                                                ops:wgpu::Operations{load:wgpu::LoadOp::Clear(wgpu::Color{r:0.05,g:0.07,b:0.11,a:1.0}),store:wgpu::StoreOp::Store},depth_slice:None})],
+                                            ..Default::default()}).forget_lifetime();
+                                        egui_rn.render(&mut rp, &tris, &screen); drop(rp);
+                                        for id in &output.textures_delta.free { egui_rn.free_texture(id); }
+                                        gpu.queue().submit([enc.finish()]); frame.present();
+                                    }
+                                }
 
-                                let mut d1=Drone::new(); persistence::load_drone_settings(&mut d1); d1.reset(0.,2.,0.);
-                                let mut d2=Drone::new(); persistence::load_drone_settings(&mut d2); d2.reset(2.,2.,0.);
-                                let(mut a1,mut a2,mut dm)=(false,false,!split);
-                                if split{dm=true;a1=true;a2=true;}
+                                // Check if background loading is done
+                                if loader.as_ref().map_or(false, |h| h.is_finished()) {
+                                    let pc_raw = loader.take().unwrap().join().unwrap();
+                                    let mut sc = pollster::block_on(SceneState::load_from_raw(&gpu, pc_raw)).unwrap();
+                                    sc.pointcloud_file_path = Some(p.clone());
+                                    let s = window.inner_size();
+                                    sc.resize(gpu.device(), s.width.max(1), s.height.max(1));
+                                    scene = Some(sc);
 
-                                // HID device is now managed via Settings panel (Detect → Select)
+                                    // Create debug axis entities
+                                    scene_entities = scene_mesh::create_axis_entities(gpu.device(), 5.0);
 
-                                phase=Phase::Playing{drone1:d1,drone2:d2,keys1:KeyState::default(),keys2:KeyStateP2::default(),
-                                    armed1:a1,armed2:a2,drone_mode:dm,split,settings_open:false,controller1:input::Controller::new()};
-                                window.set_title(if split{"MindCloud Fly [SPLIT]"}else{"MindCloud World Fly"});
+                                    // Load per-scene config (or default)
+                                    let scene_key = persistence::scene_key(&p);
+                                    let config = persistence::load_scene_config(&scene_key);
+
+                                    // Transition to Placement
+                                    let input_st = placement::PlacementInputState::from_config(&config);
+                                    phase = Phase::Placement {
+                                        mode, config, scene_path: p,
+                                        orbit: placement::OrbitState::default(),
+                                        input_state: input_st,
+                                    };
+                                    window.set_title("MindCloud Fly - Placement");
+                                }
                                 window.request_redraw();
                             }
                             Phase::Playing{ref mut drone1,ref mut drone2,ref mut keys1,ref mut keys2,
                                 ref mut armed1,ref mut armed2,ref mut drone_mode,split,
-                                ref mut settings_open,ref mut controller1} =>
+                                ref mut settings_open,ref mut controller1, world_up} =>
                             {
                                 let sc = scene.as_mut().unwrap();
                                 let split = *split;
@@ -463,12 +545,115 @@ async fn main() {
                                 }
                                 if no_vsync{window.request_redraw();}else{window.request_redraw();}
                             }
+                            Phase::Placement { mode, ref mut config, ref scene_path, ref mut orbit, ref mut input_state, .. } => {
+                                let sc = scene.as_mut().unwrap();
+                                if sc.splatting_args.walltime < Duration::from_secs(5) { sc.splatting_args.walltime += dt; }
+                                target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(16)));
+
+                                let mode = *mode;
+                                placement::update_spawn(config, orbit, dt_s);
+
+                                // Set orbit camera
+                                let (cam_pos, cam_rot) = placement::compute_orbit_camera(config, orbit);
+                                sc.splatting_args.camera.position = cam_pos;
+                                sc.splatting_args.camera.rotation = cam_rot;
+                                let aabb = sc.pc.bbox();
+                                sc.splatting_args.camera.fit_near_far(aabb);
+                                sc.splatting_args.camera.projection.znear = 0.1;
+                                sc.splatting_args.camera.projection.resize(gpu.config.width, gpu.config.height);
+
+                                // Render scene
+                                let surface_tex = match sc.render(&gpu, None) {
+                                    Ok(t) => t, Err(_) => { gpu.resize(window.inner_size().width, window.inner_size().height); window.request_redraw(); return; }
+                                };
+
+                                // Draw spawn marker + axes
+                                {
+                                    use web_splats::Camera;
+                                    let cam = &sc.splatting_args.camera;
+                                    let view = surface_tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                                        format: Some(gpu.config.format), ..Default::default()
+                                    });
+                                    let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("mesh")});
+                                    mesh_ren.render(&mut enc, &view, gpu.queue(), cam.view_matrix(), cam.proj_matrix(), &scene_entities);
+                                    let marker = scene_mesh::create_spawn_marker(gpu.device(), config.spawn, 0.5);
+                                    mesh_ren.render(&mut enc, &view, gpu.queue(), cam.view_matrix(), cam.proj_matrix(), &marker);
+                                    gpu.queue().submit([enc.finish()]);
+                                }
+
+                                // Overlay UI
+                                gpu.egui.begin_frame(&gpu.window);
+                                let action = {
+                                    let ctx = gpu.egui.winit.egui_ctx().clone();
+                                    let aabb = sc.pc.bbox();
+                                    let scene_min = [aabb.min.x, aabb.min.y, aabb.min.z];
+                                    let scene_max = [aabb.max.x, aabb.max.y, aabb.max.z];
+                                    placement::draw_overlay(&ctx, config, input_state, orbit, scene_min, scene_max)
+                                };
+                                let eo = gpu.egui.end_frame(&gpu.window);
+                                {
+                                    let view_srgb = surface_tex.texture.create_view(&Default::default());
+                                    let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("egui")});
+                                    let screen = egui_wgpu::ScreenDescriptor{size_in_pixels:[gpu.config.width,gpu.config.height],pixels_per_point:gpu.window.scale_factor() as f32};
+                                    let ctx = gpu.egui.winit.egui_ctx().clone();
+                                    let tris = ctx.tessellate(eo.shapes, eo.pixels_per_point);
+                                    let device = &gpu.wgpu_ctx.device; let queue = &gpu.wgpu_ctx.queue;
+                                    for(id,d) in &eo.textures_delta.set { gpu.egui.renderer.update_texture(device,queue,*id,d); }
+                                    gpu.egui.renderer.update_buffers(device,queue,&mut enc,&tris,&screen);
+                                    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:None,
+                                        color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view_srgb,resolve_target:None,
+                                            ops:wgpu::Operations{load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store},depth_slice:None})],
+                                        ..Default::default()}).forget_lifetime();
+                                    gpu.egui.renderer.render(&mut rp, &tris, &screen); drop(rp);
+                                    for id in &eo.textures_delta.free { gpu.egui.renderer.free_texture(id); }
+                                    queue.submit([enc.finish()]);
+                                }
+                                surface_tex.present();
+
+                                match action {
+                                    placement::PlacementAction::StartFlight => { start_flight = true; }
+                                    placement::PlacementAction::GoBack => { go_back = true; }
+                                    _ => {}
+                                }
+                                if orbit.keys_down.contains(&KeyCode::Enter) { start_flight = true; }
+
+                                window.request_redraw();
+                            }
+                        }
+                        // Deferred transitions from Placement phase
+                        if let Phase::Placement { mode, ref config, ref scene_path, ref orbit, .. } = phase {
+                            let do_start = start_flight;
+                            let do_back = go_back;
+                            if do_start {
+                                let sk = persistence::scene_key(scene_path);
+                                let _ = persistence::save_scene_config(&sk, config);
+                                let split = mode == GameMode::SplitScreen;
+                                let wu = config.world_up;
+                                let sp = config.spawn;
+                                let heading = config.heading_deg;
+                                let mut d1 = Drone::new(); d1.world_up = wu; persistence::load_drone_settings(&mut d1); d1.reset(sp[0], sp[1], sp[2]); d1.apply_spawn_heading(heading);
+                                let mut d2 = Drone::new(); d2.world_up = wu; persistence::load_drone_settings(&mut d2); d2.reset(sp[0]+2.0, sp[1], sp[2]); d2.apply_spawn_heading(heading);
+                                let (mut a1, mut a2, mut dm) = (false, false, !split);
+                                if split { dm = true; a1 = true; a2 = true; }
+                                phase = Phase::Playing {
+                                    drone1: d1, drone2: d2, keys1: KeyState::default(), keys2: KeyStateP2::default(),
+                                    armed1: a1, armed2: a2, drone_mode: dm, split,
+                                    settings_open: false, controller1: input::Controller::new(),
+                                    world_up: wu,
+                                };
+                                window.set_title(if split { "MindCloud Fly [SPLIT]" } else { "MindCloud World Fly" });
+                            } else if do_back {
+                                let sk = persistence::scene_key(scene_path);
+                                let _ = persistence::save_scene_config(&sk, config);
+                                scene = None;
+                                phase = Phase::ModeSelect;
+                                window.set_title("MindCloud World Fly");
+                            }
                         }
                         // Deferred: if scene was dropped during Playing (BackToMenu), reset phase
                         if matches!(phase, Phase::Playing{..}) && scene.is_none() {
                             phase = Phase::ModeSelect;
                             window.set_title("MindCloud World Fly");
-                            // Keep current window size — menu adapts to any size
                         }
                     }
                     _ => {}
@@ -479,5 +664,5 @@ async fn main() {
             }
             _ => {}
         }
-    }).unwrap();
+    }).ok();
 }

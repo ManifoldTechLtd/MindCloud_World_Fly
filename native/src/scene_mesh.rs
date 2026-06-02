@@ -207,6 +207,17 @@ pub fn create_axis_entities(device: &wgpu::Device, len: f32) -> Vec<Entity> {
     ]
 }
 
+/// Create a 3D cross marker at the given position (6 line segments forming a 3D cross).
+pub fn create_spawn_marker(device: &wgpu::Device, pos: [f32; 3], size: f32) -> Vec<Entity> {
+    let s = size * 0.5;
+    let c = [1.0, 0.8, 0.0, 1.0]; // yellow
+    vec![
+        Entity::new(Mesh::line(device, [pos[0]-s, pos[1], pos[2]], [pos[0]+s, pos[1], pos[2]], c)),
+        Entity::new(Mesh::line(device, [pos[0], pos[1]-s, pos[2]], [pos[0], pos[1]+s, pos[2]], c)),
+        Entity::new(Mesh::line(device, [pos[0], pos[1], pos[2]-s], [pos[0], pos[1], pos[2]+s], c)),
+    ]
+}
+
 const SHADER: &str = r#"
 struct Uniforms {
     mvp: mat4x4<f32>,

@@ -90,7 +90,11 @@ pub fn draw_hud(
 
         draw_horizon(&painter, cx, cy, w, h, drone.body_pitch, drone.body_roll);
         draw_speed_tape(&painter, w, h, cx, cy, drone.speed);
-        draw_alt_tape(&painter, w, h, cx, cy, drone.z);
+        let altitude = match drone.world_up {
+            crate::app_state::WorldUp::Zup => drone.z,
+            crate::app_state::WorldUp::Colmap => -drone.y,
+        };
+        draw_alt_tape(&painter, w, h, cx, cy, altitude);
         draw_heading(&painter, w, h, cx, cy, drone.yaw);
         draw_vsi(&painter, w, h, cx, cy, drone.vertical_speed);
 
