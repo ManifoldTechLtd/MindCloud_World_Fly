@@ -55,10 +55,11 @@ pub fn update_spawn(config: &mut SceneConfig, orbit: &OrbitState, dt: f32) {
             if orbit.keys_down.contains(&KeyCode::KeyQ) { config.spawn[2] -= move_speed; }
         }
         WorldUp::Colmap => {
-            if orbit.keys_down.contains(&KeyCode::KeyW) { config.spawn[0] -= sin_y * move_speed; config.spawn[2] -= cos_y * move_speed; }
-            if orbit.keys_down.contains(&KeyCode::KeyS) { config.spawn[0] += sin_y * move_speed; config.spawn[2] += cos_y * move_speed; }
-            if orbit.keys_down.contains(&KeyCode::KeyD) { config.spawn[0] -= cos_y * move_speed; config.spawn[2] += sin_y * move_speed; }
-            if orbit.keys_down.contains(&KeyCode::KeyA) { config.spawn[0] += cos_y * move_speed; config.spawn[2] -= sin_y * move_speed; }
+            // Forward=+X at yaw=0, right=+Z→-Z (screen right) at yaw=0
+            if orbit.keys_down.contains(&KeyCode::KeyW) { config.spawn[0] += cos_y * move_speed; config.spawn[2] += sin_y * move_speed; }
+            if orbit.keys_down.contains(&KeyCode::KeyS) { config.spawn[0] -= cos_y * move_speed; config.spawn[2] -= sin_y * move_speed; }
+            if orbit.keys_down.contains(&KeyCode::KeyD) { config.spawn[0] += sin_y * move_speed; config.spawn[2] -= cos_y * move_speed; }
+            if orbit.keys_down.contains(&KeyCode::KeyA) { config.spawn[0] -= sin_y * move_speed; config.spawn[2] += cos_y * move_speed; }
             if orbit.keys_down.contains(&KeyCode::KeyE) { config.spawn[1] -= move_speed; }
             if orbit.keys_down.contains(&KeyCode::KeyQ) { config.spawn[1] += move_speed; }
         }
@@ -85,9 +86,9 @@ pub fn compute_orbit_camera(config: &SceneConfig, orbit: &OrbitState) -> (Point3
             -sin_p * d,
         ),
         WorldUp::Colmap => Vector3::new(
-            -yaw_rad.sin() * cos_p * d,
+            -yaw_rad.cos() * cos_p * d,
             sin_p * d,
-            yaw_rad.cos() * cos_p * d,
+            -yaw_rad.sin() * cos_p * d,
         ),
     };
 

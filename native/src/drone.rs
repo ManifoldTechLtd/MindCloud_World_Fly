@@ -47,9 +47,10 @@ fn ned_identity(world_up: crate::app_state::WorldUp) -> Quaternion<f32> {
             Quaternion::new(0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0)
         }
         crate::app_state::WorldUp::Colmap => {
-            // body+X→world(0,0,-1), body+Y→world(-1,0,0), body+Z→world(0,1,0)
+            // body+X→world(1,0,0), body+Y→world(0,0,-1), body+Z→world(0,1,0)
             // Thrust (body -Z) → world -Y (up in COLMAP where +Y=down)
-            Quaternion::new(0.5, -0.5, 0.5, 0.5)
+            // Forward at heading=0 is world +X
+            Quaternion::new(std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0)
         }
     }
 }
@@ -173,6 +174,7 @@ pub struct Drone {
 
     // Spawn
     spawn_x: f32, spawn_y: f32, spawn_z: f32,
+    pub spawn_heading: f32,
 }
 
 impl Drone {
@@ -234,6 +236,7 @@ impl Drone {
             camera_tilt_angle: 0.0,
 
             spawn_x: 0.0, spawn_y: 2.0, spawn_z: 0.0,
+            spawn_heading: 0.0,
         }
     }
 
@@ -253,19 +256,27 @@ impl Drone {
         self.thrust_output = 0.0;
         self.target_x = self.spawn_x; self.target_y = self.spawn_y; self.target_z = self.spawn_z;
         self.clear_pid_state();
+        self.apply_spawn_heading(self.spawn_heading);
     }
 
     /// Rotate the current orientation by heading_deg around the world up axis.
     /// Called after reset_to_spawn to set the initial facing direction.
     pub fn apply_spawn_heading(&mut self, heading_deg: f32) {
         if heading_deg.abs() < 0.01 { return; }
-        let up_axis = match self.world_up {
-            crate::app_state::WorldUp::Zup => Vector3::unit_z(),
-            crate::app_state::WorldUp::Colmap => -Vector3::unit_y(), // world up = -Y
-        };
-        // Left-multiply: world-frame rotation around up axis
-        let yaw_q = Quaternion::from_axis_angle(up_axis, Rad(heading_deg * DEG2RAD));
-        self.orientation = (yaw_q * self.orientation).normalize();
+        match self.world_up {
+            crate::app_state::WorldUp::Zup => {
+                // Z-up: left-multiply rotates body axes in world frame.
+                // Orbit CW = positive yaw, right-hand +Z = CCW → negate angle.
+                let yaw_q = Quaternion::from_axis_angle(Vector3::unit_z(), Rad(-heading_deg * DEG2RAD));
+                self.orientation = (yaw_q * self.orientation).normalize();
+            }
+            crate::app_state::WorldUp::Colmap => {
+                // COLMAP: right-multiply keeps body+Z (down) in world Y-axis.
+                // Positive heading rotates forward from +X toward +Z (matching orbit yaw).
+                let yaw_q = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(heading_deg * DEG2RAD));
+                self.orientation = (self.orientation * yaw_q).normalize();
+            }
+        }
     }
 
     pub fn reset(&mut self, x: f32, y: f32, z: f32) {
@@ -483,8 +494,8 @@ impl Drone {
                 (yaw_deg, body_pitch, body_roll)
             }
             crate::app_state::WorldUp::Colmap => {
-                // Horizontal = XZ, vertical = -Y (+Y=down). At spawn fwd=(0,0,-1).
-                let yaw_deg = fwd.x.atan2(-fwd.z) * RAD2DEG;
+                // Horizontal = XZ, vertical = -Y (+Y=down). At spawn fwd=(1,0,0).
+                let yaw_deg = fwd.z.atan2(fwd.x) * RAD2DEG;
                 let body_pitch = (-fwd.y).asin() * RAD2DEG;  // -fwd.y because +Y=down
                 let body_roll = (-right.y).atan2(down.y) * RAD2DEG;
                 (yaw_deg, body_pitch, body_roll)
@@ -518,16 +529,16 @@ impl Drone {
         self.roll_rate *= damp;
         self.yaw_rate *= damp;
 
-        // Auto-level toward identity tilt (keep current yaw)
+        // Auto-level toward zero tilt (keep current yaw)
         let (_, body_pitch, body_roll) = self.decompose_orientation();
         let level_speed = 60.0; // deg/s
         let pitch_step = (level_speed * dt).min(body_pitch.abs());
         let roll_step = (level_speed * dt).min(body_roll.abs());
 
-        // Use angular rates to level, then integrate
-        // Positive body_pitch means nose up → need negative pitch rate to level → but integrate_orientation
-        // negates internally, so we pass positive (same sign as body_pitch to cancel it)
-        let level_pitch_rate = if pitch_step > 0.01 { body_pitch.signum() * level_speed } else { 0.0 };
+        // From Drone mode P-controller (empirically verified):
+        //   pitch_rate<0 → nose down (reduces positive body_pitch)
+        //   roll_rate>0 → reduces positive body_roll (rolls back left)
+        let level_pitch_rate = if pitch_step > 0.01 { -body_pitch.signum() * level_speed } else { 0.0 };
         let level_roll_rate = if roll_step > 0.01 { body_roll.signum() * level_speed } else { 0.0 };
 
         // NED: ω_x = roll, ω_y = pitch, ω_z = yaw

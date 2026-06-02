@@ -161,9 +161,15 @@ async fn main() {
                                 } else { show_exit_dialog = true; }
                             }
 
-                            // Placement phase keyboard
+                            // Placement phase keyboard (only when egui doesn't want text input)
                             if let Phase::Placement { ref mut orbit, .. } = phase {
-                                if pressed { orbit.keys_down.insert(key); } else { orbit.keys_down.remove(&key); }
+                                let egui_wants_kb = gpu.egui.winit.egui_ctx().wants_keyboard_input();
+                                if !egui_wants_kb {
+                                    if pressed { orbit.keys_down.insert(key); } else { orbit.keys_down.remove(&key); }
+                                } else {
+                                    // Clear all keys when egui has focus to avoid stuck keys
+                                    orbit.keys_down.clear();
+                                }
                             }
 
                             if let Phase::Playing { ref mut keys1, ref mut keys2, ref mut armed1, ref mut armed2,
@@ -192,7 +198,7 @@ async fn main() {
                                         KeyCode::ArrowUp=>keys1.up=pressed, KeyCode::ArrowDown=>keys1.down=pressed,
                                         KeyCode::ArrowLeft=>keys1.left=pressed, KeyCode::ArrowRight=>keys1.right=pressed,
                                         KeyCode::Space=>{if pressed{*armed1=!*armed1;}}
-                                        KeyCode::KeyR=>{if pressed{drone1.reset(0.,2.,0.);}}
+                                        KeyCode::KeyR=>{if pressed{drone1.reset_to_spawn();}}
                                         _ => {}
                                     }
                                 }
@@ -203,7 +209,7 @@ async fn main() {
                                         KeyCode::KeyI=>keys2.i=pressed, KeyCode::KeyK=>keys2.k=pressed,
                                         KeyCode::KeyJ=>keys2.j=pressed, KeyCode::KeyL=>keys2.l=pressed,
                                         KeyCode::Enter=>{if pressed{*armed2=!*armed2;}}
-                                        KeyCode::Backspace=>{if pressed{drone2.reset(2.,2.,0.);}}
+                                        KeyCode::Backspace=>{if pressed{drone2.reset_to_spawn();}}
                                         _ => {}
                                     }
                                 }
@@ -344,9 +350,11 @@ async fn main() {
 
                                     // Transition to Placement
                                     let input_st = placement::PlacementInputState::from_config(&config);
+                                    let mut orbit_st = placement::OrbitState::default();
+                                    orbit_st.yaw = config.heading_deg;
                                     phase = Phase::Placement {
                                         mode, config, scene_path: p,
-                                        orbit: placement::OrbitState::default(),
+                                        orbit: orbit_st,
                                         input_state: input_st,
                                     };
                                     window.set_title("MindCloud Fly - Placement");
@@ -631,8 +639,8 @@ async fn main() {
                                 let wu = config.world_up;
                                 let sp = config.spawn;
                                 let heading = config.heading_deg;
-                                let mut d1 = Drone::new(); d1.world_up = wu; persistence::load_drone_settings(&mut d1); d1.reset(sp[0], sp[1], sp[2]); d1.apply_spawn_heading(heading);
-                                let mut d2 = Drone::new(); d2.world_up = wu; persistence::load_drone_settings(&mut d2); d2.reset(sp[0]+2.0, sp[1], sp[2]); d2.apply_spawn_heading(heading);
+                                let mut d1 = Drone::new(); d1.world_up = wu; d1.spawn_heading = heading; persistence::load_drone_settings(&mut d1); d1.reset(sp[0], sp[1], sp[2]);
+                                let mut d2 = Drone::new(); d2.world_up = wu; d2.spawn_heading = heading; persistence::load_drone_settings(&mut d2); d2.reset(sp[0]+2.0, sp[1], sp[2]);
                                 let (mut a1, mut a2, mut dm) = (false, false, !split);
                                 if split { dm = true; a1 = true; a2 = true; }
                                 phase = Phase::Playing {
