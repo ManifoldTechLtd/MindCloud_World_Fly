@@ -240,6 +240,27 @@ pub fn load_scene_config(scene_key: &str) -> crate::app_state::SceneConfig {
         .unwrap_or_default()
 }
 
+/// Save last used HID device path.
+pub fn save_hid_device_path(path: &std::ffi::CStr) -> anyhow::Result<()> {
+    ensure_config_dir();
+    let s = path.to_string_lossy().to_string();
+    std::fs::write(config_dir().join("hid_device.txt"), s)?;
+    Ok(())
+}
+
+/// Load last used HID device path (returns None if not saved).
+pub fn load_hid_device_path() -> Option<std::ffi::CString> {
+    let s = std::fs::read_to_string(config_dir().join("hid_device.txt")).ok()?;
+    let s = s.trim();
+    if s.is_empty() { return None; }
+    std::ffi::CString::new(s).ok()
+}
+
+/// Clear saved HID device path (on disconnect).
+pub fn clear_hid_device_path() {
+    let _ = std::fs::remove_file(config_dir().join("hid_device.txt"));
+}
+
 /// Load controller mapping from disk.
 pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
     if let Ok(json) = std::fs::read_to_string(config_dir().join("mapping.json")) {

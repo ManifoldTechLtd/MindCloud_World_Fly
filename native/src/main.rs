@@ -375,14 +375,41 @@ async fn main() {
                                     hid_rx = None; // drop old receiver
                                     controller1.hid_connected = false;
                                     match input::open_hid_device(&path) {
-                                        Ok(rx) => { hid_rx = Some(rx); log::info!("HID device opened"); }
+                                        Ok(rx) => {
+                                            hid_rx = Some(rx);
+                                            let _ = persistence::save_hid_device_path(&path);
+                                            log::info!("HID device opened and saved");
+                                        }
                                         Err(e) => { log::warn!("Failed to open HID: {}", e); }
+                                    }
+                                }
+
+                                // Handle disconnect request from settings
+                                if settings::take_disconnect_request() {
+                                    hid_rx = None;
+                                    controller1.hid_connected = false;
+                                    log::info!("HID device disconnected");
+                                }
+
+                                // Auto-connect saved HID device (once per session)
+                                static HID_AUTO_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                                if hid_rx.is_none() && !controller1.hid_connected && !HID_AUTO_TRIED.load(std::sync::atomic::Ordering::Relaxed) {
+                                    HID_AUTO_TRIED.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    if let Some(path) = persistence::load_hid_device_path() {
+                                        match input::open_hid_device(&path) {
+                                            Ok(rx) => {
+                                                hid_rx = Some(rx);
+                                                log::info!("Auto-connected saved HID device");
+                                            }
+                                            Err(_) => {
+                                                persistence::clear_hid_device_path();
+                                            }
+                                        }
                                     }
                                 }
 
                                 // Poll HID controller data (always, even when paused — needed for listen mode)
                                 if let Some(ref rx) = hid_rx {
-                                    // Check for disconnect
                                     let mut got_data = false;
                                     while let Ok(data) = rx.try_recv() {
                                         controller1.feed_hid_report(&data);

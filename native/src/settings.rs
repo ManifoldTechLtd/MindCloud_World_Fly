@@ -9,11 +9,20 @@ use crate::input::Controller;
 // Static state for HID device picker
 static DETECTED_DEVICES: Mutex<Option<Vec<crate::input::HidDeviceInfo>>> = Mutex::new(None);
 static SELECTED_HID_PATH: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
+static HID_DISCONNECT_REQUESTED: Mutex<bool> = Mutex::new(false);
 
 /// Check if the user selected a HID device from the settings panel.
 /// Returns the path if one was selected (caller should open it).
 pub fn take_selected_hid_path() -> Option<std::ffi::CString> {
     SELECTED_HID_PATH.lock().unwrap().take()
+}
+
+/// Check if disconnect was requested.
+pub fn take_disconnect_request() -> bool {
+    let mut flag = HID_DISCONNECT_REQUESTED.lock().unwrap();
+    let v = *flag;
+    *flag = false;
+    v
 }
 
 /// Draw the settings panel. Returns true if it should be visible.
@@ -190,8 +199,10 @@ pub fn draw_settings(
                             }
                         }
                         ui.add_space(5.0);
-                        if ui.button("Disconnect / Change Device").clicked() {
+                        if ui.button("Disconnect").clicked() {
                             controller.hid_connected = false;
+                            *HID_DISCONNECT_REQUESTED.lock().unwrap() = true;
+                            crate::persistence::clear_hid_device_path();
                         }
                     } else {
                         ui.label(RichText::new("No HID device connected").size(12.0).color(Color32::from_rgb(200, 150, 50)));

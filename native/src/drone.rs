@@ -165,6 +165,9 @@ pub struct Drone {
     pub collision_radius: f32,
     pub bounce_damping: f32,
 
+    /// FPV position lock: true after arm until throttle exceeds 20%
+    pub fpv_pos_locked: bool,
+
     // ---- Output state ----
     pub is_colliding: bool,
     pub collision_intensity: f32,
@@ -229,6 +232,7 @@ impl Drone {
             angular_drag: 8.0,
             collision_radius: 0.3,
             bounce_damping: 0.3,
+            fpv_pos_locked: true,
 
             is_colliding: false,
             collision_intensity: 0.0,
@@ -314,9 +318,15 @@ impl Drone {
         // Control law
         if !input.armed {
             self.update_disarmed(dt);
+            self.fpv_pos_locked = true; // reset lock for next arm
         } else if self.flight_mode == FlightMode::Drone {
             self.control_drone(dt, input);
+            self.fpv_pos_locked = false;
         } else {
+            // FPV mode: unlock position when throttle > 20% (-1..1 scale, 20% = -0.6)
+            if self.fpv_pos_locked && input.throttle > -0.6 {
+                self.fpv_pos_locked = false;
+            }
             self.control_fpv(dt, input);
         }
 
@@ -335,36 +345,40 @@ impl Drone {
                 self.x, self.y, self.z, self.vy);
         }
 
-        // Forces: thrust along body -Z + gravity + quadratic drag
-        let mass_g = self.mass.max(1.0);
-        let mass_kg = mass_g / 1000.0;
-        let thrust_accel = (self.thrust_output / mass_g) * G;
-        let mut ax = thrust_dir.x * thrust_accel;
-        let mut ay = thrust_dir.y * thrust_accel;
-        let mut az = thrust_dir.z * thrust_accel;
-        // Gravity along world down axis
-        match self.world_up {
-            crate::app_state::WorldUp::Zup => { az -= G; }     // gravity = (0, 0, -G)
-            crate::app_state::WorldUp::Colmap => { ay += G; }  // gravity = (0, +G, 0), +Y = down
-        }
+        // Skip physics when position-locked (disarmed or FPV pre-throttle)
+        let pos_frozen = !input.armed || self.fpv_pos_locked;
+        if !pos_frozen {
+            // Forces: thrust along body -Z + gravity + quadratic drag
+            let mass_g = self.mass.max(1.0);
+            let mass_kg = mass_g / 1000.0;
+            let thrust_accel = (self.thrust_output / mass_g) * G;
+            let mut ax = thrust_dir.x * thrust_accel;
+            let mut ay = thrust_dir.y * thrust_accel;
+            let mut az = thrust_dir.z * thrust_accel;
+            // Gravity along world down axis
+            match self.world_up {
+                crate::app_state::WorldUp::Zup => { az -= G; }     // gravity = (0, 0, -G)
+                crate::app_state::WorldUp::Colmap => { ay += G; }  // gravity = (0, +G, 0), +Y = down
+            }
 
-        // Quadratic drag
-        let spd = (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz).sqrt();
-        if spd > 0.001 {
-            let drag_force = 0.5 * self.drag_cd * self.drag_area * AIR_DENSITY * spd * spd;
-            let drag_accel = drag_force / mass_kg;
-            ax -= (self.vx / spd) * drag_accel;
-            ay -= (self.vy / spd) * drag_accel;
-            az -= (self.vz / spd) * drag_accel;
-        }
+            // Quadratic drag
+            let spd = (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz).sqrt();
+            if spd > 0.001 {
+                let drag_force = 0.5 * self.drag_cd * self.drag_area * AIR_DENSITY * spd * spd;
+                let drag_accel = drag_force / mass_kg;
+                ax -= (self.vx / spd) * drag_accel;
+                ay -= (self.vy / spd) * drag_accel;
+                az -= (self.vz / spd) * drag_accel;
+            }
 
-        // Integrate velocity & position
-        self.vx += ax * dt;
-        self.vy += ay * dt;
-        self.vz += az * dt;
-        self.x += self.vx * dt;
-        self.y += self.vy * dt;
-        self.z += self.vz * dt;
+            // Integrate velocity & position
+            self.vx += ax * dt;
+            self.vy += ay * dt;
+            self.vz += az * dt;
+            self.x += self.vx * dt;
+            self.y += self.vy * dt;
+            self.z += self.vz * dt;
+        }
 
         // NaN guard
         if self.x.is_nan() || self.y.is_nan() || self.z.is_nan() {
@@ -521,26 +535,22 @@ impl Drone {
 
     fn update_disarmed(&mut self, dt: f32) {
         self.thrust_output = 0.0;
-        let damp = (-self.angular_drag * dt).exp();
-        self.pitch_rate *= damp;
-        self.roll_rate *= damp;
-        self.yaw_rate *= damp;
+        self.vx = 0.0; self.vy = 0.0; self.vz = 0.0;
 
-        // Auto-level toward zero tilt (keep current yaw)
-        let (_, body_pitch, body_roll) = self.decompose_orientation();
-        let level_speed = 60.0; // deg/s
-        let pitch_step = (level_speed * dt).min(body_pitch.abs());
-        let roll_step = (level_speed * dt).min(body_roll.abs());
+        // Auto-level using same P-controller as Drone mode (target = 0°)
+        let (_, body_pitch_deg, body_roll_deg) = self.decompose_orientation();
+        let max_rate = 60.0;
+        // Same sign convention as control_drone:
+        //   pitch_err = target(0) - current → pitch_rate = err * gain
+        //   roll_err = current - target(0) → roll_rate = err * gain
+        self.pitch_rate = clamp(-body_pitch_deg * 3.0, -max_rate, max_rate);
+        self.roll_rate = clamp(body_roll_deg * 3.0, -max_rate, max_rate);
 
-        // From Drone mode P-controller (empirically verified):
-        //   pitch_rate<0 → nose down (reduces positive body_pitch)
-        //   roll_rate>0 → reduces positive body_roll (rolls back left)
-        let level_pitch_rate = if pitch_step > 0.01 { -body_pitch.signum() * level_speed } else { 0.0 };
-        let level_roll_rate = if roll_step > 0.01 { body_roll.signum() * level_speed } else { 0.0 };
+        // Damp yaw
+        self.yaw_rate *= (-self.angular_drag * dt).exp();
 
-        // NED: ω_x = roll, ω_y = pitch, ω_z = yaw
-        let omega_x = level_roll_rate * DEG2RAD;
-        let omega_y = level_pitch_rate * DEG2RAD;
+        let omega_x = self.roll_rate * DEG2RAD;
+        let omega_y = self.pitch_rate * DEG2RAD;
         let omega_z = self.yaw_rate * DEG2RAD;
         self.integrate_orientation(omega_x, omega_y, omega_z, dt);
     }
@@ -575,7 +585,12 @@ impl Drone {
         self.integrate_orientation(omega_x, omega_y, omega_z, dt);
 
         // Throttle → thrust (grams-force)
-        self.thrust_output = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
+        if self.fpv_pos_locked {
+            // Position locked: attitude control only, no thrust
+            self.thrust_output = 0.0;
+        } else {
+            self.thrust_output = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
+        }
     }
 
     /// Stabilize mode: roll/pitch sticks → target angle, yaw stick → angular rate.
