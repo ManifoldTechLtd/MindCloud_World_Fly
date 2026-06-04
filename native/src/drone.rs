@@ -262,6 +262,7 @@ impl Drone {
         self.is_colliding = false;
         self.collision_intensity = 0.0;
         self.thrust_output = 0.0;
+        self.fpv_pos_locked = true;
         self.target_x = self.spawn_x; self.target_y = self.spawn_y; self.target_z = self.spawn_z;
         self.clear_pid_state();
         self.apply_spawn_heading(self.spawn_heading);

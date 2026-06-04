@@ -176,6 +176,35 @@ impl GenericGaussianPointCloud {
     pub fn compressed(&self) -> bool {
         self.compressed
     }
+
+    /// Extract point positions as a flat Vec<f32> [x0,y0,z0, x1,y1,z1, ...]
+    /// for collision detection octree building.
+    /// Filters out points with opacity below `min_opacity` (0-1 range).
+    pub fn extract_positions_filtered(&self, min_opacity: f32) -> Vec<f32> {
+        if self.compressed {
+            let gaussians: &[GaussianCompressed] = bytemuck::cast_slice(&self.gaussians);
+            let mut pos = Vec::with_capacity(gaussians.len() * 3);
+            for g in gaussians {
+                let opacity = (g.opacity as f32 + 128.0) / 255.0;
+                if opacity < min_opacity { continue; }
+                pos.push(g.xyz.x);
+                pos.push(g.xyz.y);
+                pos.push(g.xyz.z);
+            }
+            pos
+        } else {
+            let gaussians: &[Gaussian] = bytemuck::cast_slice(&self.gaussians);
+            let mut pos = Vec::with_capacity(gaussians.len() * 3);
+            for g in gaussians {
+                let opacity = g.opacity.to_f32();
+                if opacity < min_opacity { continue; }
+                pos.push(g.xyz.x);
+                pos.push(g.xyz.y);
+                pos.push(g.xyz.z);
+            }
+            pos
+        }
+    }
 }
 
 // Fit a plane to a collection of points.

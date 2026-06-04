@@ -60,6 +60,15 @@ impl KeyStateP2 {
     }
 }
 
+fn check_collision(drone: &mut Drone, octree: &collision::Octree) {
+    let hits = octree.query_sphere(drone.x, drone.y, drone.z, drone.collision_radius);
+    if let Some(result) = collision::compute_collision_response(drone.x, drone.y, drone.z, drone.collision_radius, &hits) {
+        drone.apply_collision(result.normal, result.penetration);
+    } else {
+        drone.clear_collision();
+    }
+}
+
 fn apply_drone_cam(scene: &mut SceneState, d: &Drone, dt: Duration) {
     if scene.splatting_args.walltime < Duration::from_secs(5) { scene.splatting_args.walltime += dt; }
     let (p, r) = d.camera_transform();
@@ -108,6 +117,7 @@ async fn main() {
     };
 
     let mut scene: Option<SceneState> = None;
+    let mut collision_octree = collision::Octree::new();
     let mesh_ren = scene_mesh::MeshRenderer::new(gpu.device(), gpu.config.format);
     let mut scene_entities: Vec<scene_mesh::Entity> = Vec::new();
     let mut hid_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>> = None;
@@ -335,6 +345,15 @@ async fn main() {
                                 // Check if background loading is done
                                 if loader.as_ref().map_or(false, |h| h.is_finished()) {
                                     let pc_raw = loader.take().unwrap().join().unwrap();
+
+                                    // Build collision octree from point positions
+                                    let positions = pc_raw.extract_positions_filtered(0.02);
+                                    let aabb = &pc_raw.aabb;
+                                    let bounds_min = [aabb.min.x, aabb.min.y, aabb.min.z];
+                                    let bounds_max = [aabb.max.x, aabb.max.y, aabb.max.z];
+                                    collision_octree.build(positions, bounds_min, bounds_max);
+                                    log::info!("Built collision octree for {} points", pc_raw.num_points);
+
                                     let mut sc = pollster::block_on(SceneState::load_from_raw(&gpu, pc_raw)).unwrap();
                                     sc.pointcloud_file_path = Some(p.clone());
                                     let s = window.inner_size();
@@ -438,7 +457,9 @@ async fn main() {
                                             };
                                         }
                                         drone1.update(dt_s, &i1);
+                                        check_collision(drone1, &collision_octree);
                                         let i2=keys2.to_input(*armed2); drone2.update(dt_s,&i2);
+                                        check_collision(drone2, &collision_octree);
                                     }
                                     if sc.splatting_args.walltime<Duration::from_secs(5){sc.splatting_args.walltime+=dt;}
                                     // Camera args
@@ -518,6 +539,7 @@ async fn main() {
                                             };
                                         }
                                         drone1.update(dt_s, &i1);
+                                        check_collision(drone1, &collision_octree);
                                     }
                                     apply_drone_cam(sc, drone1, dt);
                                     sc.splatting_args.camera.projection.resize(gpu.config.width, gpu.config.height);
