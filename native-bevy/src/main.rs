@@ -1,16 +1,19 @@
-/// Phase 0.B: web-splat + Bevy hybrid — validation
+/// MindCloud Fly — Bevy + web-splat hybrid renderer
 ///
-/// Step 1: Just get Bevy running with PBR objects + FPS display.
-/// Step 2: Integrate web-splat as background renderer (next iteration).
-///
-/// For now this validates that Bevy 0.18 + wgpu 27 works on this machine
-/// and that PBR mesh rendering is performant.
+/// Architecture:
+/// - Bevy renders PBR 3D objects (gates, buildings, glTF models)
+/// - web-splat renders Gaussian Splat scene as background (via SplatPlugin)
+/// - Both share the same wgpu 27 Device
+
+mod splat_plugin;
 
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use clap::Parser;
+
+use splat_plugin::{SplatPlugin, SplatCamera};
 
 #[derive(Parser, Debug)]
 #[command(name = "mindcloud-fly-bevy", about = "MindCloud Fly — Bevy + web-splat hybrid")]
@@ -46,6 +49,7 @@ fn main() {
 
     app.add_plugins(DefaultPlugins.set(window_plugin));
     app.add_plugins(PanOrbitCameraPlugin);
+    app.add_plugins(SplatPlugin);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default());
 
     app.insert_resource(SceneInput { path: args.input });
@@ -65,98 +69,113 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     scene_input: Res<SceneInput>,
+    mut splat_scene: ResMut<splat_plugin::SplatScene>,
 ) {
     if let Some(ref path) = scene_input.path {
-        info!("PLY path provided: {} (web-splat integration pending)", path);
+        info!("Starting PLY background load: {}", path);
+        splat_scene.start_loading(path.clone());
     }
 
-    // Test PBR objects — these will eventually coexist with gaussian splats
+    // Point that the camera orbits around and where we anchor the demo objects.
+    let focus = Vec3::new(50.0, 35.0, 5.0);
+
+    // --- PBR 3D objects placed inside the gaussian splat scene ---
+    let cube_mesh = meshes.add(Cuboid::new(8.0, 8.0, 8.0));
+    let sphere_mesh = meshes.add(Sphere::new(5.0));
+
+    // Red cube at the focus
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        Mesh3d(cube_mesh.clone()),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.2, 0.2),
-            emissive: LinearRgba::new(2.0, 0.4, 0.4, 1.0),
+            base_color: Color::srgb(0.9, 0.15, 0.15),
+            perceptual_roughness: 0.5,
             ..default()
         })),
-        Transform::from_xyz(0.0, 0.5, 0.0),
+        Transform::from_translation(focus),
     ));
-
+    // Blue sphere offset along +X
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.5, 2.0, 0.5))),
+        Mesh3d(sphere_mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.2, 0.8, 1.0, 0.7),
-            alpha_mode: AlphaMode::Blend,
-            emissive: LinearRgba::new(0.4, 1.6, 2.0, 1.0),
+            base_color: Color::srgb(0.15, 0.45, 0.95),
+            metallic: 0.3,
+            perceptual_roughness: 0.3,
             ..default()
         })),
-        Transform::from_xyz(2.0, 1.0, 0.0),
+        Transform::from_translation(focus + Vec3::new(16.0, 0.0, 0.0)),
+    ));
+    // Green cube offset along -X
+    commands.spawn((
+        Mesh3d(cube_mesh),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.85, 0.3),
+            perceptual_roughness: 0.6,
+            ..default()
+        })),
+        Transform::from_translation(focus + Vec3::new(-16.0, 0.0, 0.0)),
     ));
 
-    // Gate-like frame (square ring)
-    let gate_color = Color::srgb(1.0, 0.84, 0.0);
-    let gate_mat = materials.add(StandardMaterial {
-        base_color: gate_color,
-        emissive: LinearRgba::new(3.0, 2.5, 0.0, 1.0),
-        unlit: true,
-        ..default()
-    });
-    // Top bar
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(2.0, 0.1, 0.1))),
-        MeshMaterial3d(gate_mat.clone()),
-        Transform::from_xyz(0.0, 1.0, -5.0),
-    ));
-    // Bottom bar
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(2.0, 0.1, 0.1))),
-        MeshMaterial3d(gate_mat.clone()),
-        Transform::from_xyz(0.0, -1.0, -5.0),
-    ));
-    // Left bar
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.1, 2.0, 0.1))),
-        MeshMaterial3d(gate_mat.clone()),
-        Transform::from_xyz(-1.0, 0.0, -5.0),
-    ));
-    // Right bar
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.1, 2.0, 0.1))),
-        MeshMaterial3d(gate_mat.clone()),
-        Transform::from_xyz(1.0, 0.0, -5.0),
-    ));
-
-    // Light
+    // --- Lighting for the PBR meshes ---
     commands.spawn((
         DirectionalLight {
-            illuminance: 10000.0,
+            illuminance: 12000.0,
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.5, 0.0)),
+        Transform::from_translation(focus + Vec3::new(30.0, 60.0, 40.0))
+            .looking_at(focus, Vec3::Z),
     ));
 
-    // Camera
+    // Camera — SplatCamera marks it for gaussian splat background rendering.
+    // clear_color=None: the splat node fills the ViewTarget as background BEFORE the
+    // main opaque pass, which then loads it and draws the meshes on top.
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,
-        Transform::from_xyz(5.0, 3.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        PanOrbitCamera::default(),
+        // No MSAA: the splat is rendered to the single-sample ViewTarget before the opaque
+        // pass. With MSAA on, the opaque pass's MSAA resolve would overwrite the splat.
+        Msaa::Off,
+        Camera {
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        AmbientLight {
+            color: Color::WHITE,
+            brightness: 400.0,
+            ..default()
+        },
+        Transform::from_translation(focus + Vec3::new(5.0, 0.0, 3.0)).looking_at(focus, Vec3::Z),
+        PanOrbitCamera {
+            focus,
+            radius: Some(45.0),
+            ..default()
+        },
+        SplatCamera,
     ));
 
-    info!("=== Bevy + web-splat hybrid: mesh-only mode ===");
+    info!("=== Bevy + web-splat hybrid: splat background + PBR meshes ===");
     info!("Controls: Left-drag=orbit, Right-drag=pan, Scroll=zoom");
 }
 
 fn update_window_title(
     diagnostics: Res<DiagnosticsStore>,
     mut windows: Query<&mut Window>,
+    splat_scene: Res<splat_plugin::SplatScene>,
 ) {
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
         .unwrap_or(0.0);
 
+    let status = if splat_scene.loaded {
+        "splat loaded"
+    } else if splat_scene.ply_path.is_some() {
+        "loading PLY..."
+    } else {
+        "no scene"
+    };
+
     if let Ok(mut window) = windows.single_mut() {
-        window.title = format!("{:.0} FPS | Bevy mesh-only (web-splat pending)", fps);
+        window.title = format!("{:.0} FPS | {}", fps, status);
     }
 }
