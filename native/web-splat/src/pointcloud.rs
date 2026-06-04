@@ -355,6 +355,9 @@ pub struct Splat {
     pub v: Vector4<f16>,
     pub pos: Vector2<f16>,
     pub color: Vector4<f16>,
+    /// Depth in the host renderer's clip space (reverse-Z NDC) for depth testing
+    /// against external geometry (e.g. Bevy PBR meshes). 0 when unused.
+    pub depth: f32,
 }
 
 #[repr(C)]

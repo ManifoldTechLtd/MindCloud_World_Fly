@@ -37,6 +37,21 @@ impl GaussianRenderer {
         sh_deg: u32,
         compressed: bool,
     ) -> Self {
+        Self::new_with_depth(device, queue, color_format, sh_deg, compressed, None).await
+    }
+
+    /// Like [`Self::new`], but when `depth_format` is `Some`, the rasterization pipeline gets a
+    /// read-only depth-stencil state (reverse-Z `Greater`, no depth write) so splats can be
+    /// depth-tested against an externally-provided depth buffer (e.g. Bevy mesh depth). Render
+    /// passes using this renderer must then attach a matching depth buffer.
+    pub async fn new_with_depth(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        sh_deg: u32,
+        compressed: bool,
+        depth_format: Option<wgpu::TextureFormat>,
+    ) -> Self {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("render pipeline layout"),
             bind_group_layouts: &[
@@ -91,7 +106,18 @@ impl GaussianRenderer {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+                format,
+                // Read-only: splats test against external (mesh) depth but never write it;
+                // splat<->splat ordering is handled by the GPU sort + front-to-back blend.
+                depth_write_enabled: false,
+                // Reverse-Z: a splat passes if it is closer than the stored mesh depth
+                // (larger reverse-Z value). Far/empty depth clears to 0, so splats always pass
+                // where there is no mesh.
+                depth_compare: wgpu::CompareFunction::Greater,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             cache: None,
             multiview: None,
@@ -665,7 +691,9 @@ pub struct SplattingArgsUniform {
 
     walltime: f32,
     scene_extend: f32,
-    _pad: [u32; 2],
+    // host renderer (Bevy) near plane for reverse-Z depth; 0 => depth disabled
+    bevy_near: f32,
+    _pad: u32,
 
     scene_center: Vector4<f32>,
 }
@@ -694,6 +722,7 @@ impl SplattingArgsUniform {
                 .to_vec()
                 .extend(0.),
             walltime: args.walltime.as_secs_f32(),
+            bevy_near: args.camera.projection.znear,
             scene_center: pc.center().to_vec().extend(0.),
             scene_extend: args
                 .scene_extend
@@ -721,7 +750,8 @@ impl Default for SplattingArgsUniform {
             walltime: 0.,
             scene_center: Vector4::new(0., 0., 0., 0.),
             scene_extend: 1.,
-            _pad: [0; 2],
+            bevy_near: 0.,
+            _pad: 0,
         }
     }
 }

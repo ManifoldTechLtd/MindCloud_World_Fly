@@ -4,7 +4,8 @@
 /// - Main world: loads PLY file in background thread
 /// - Once loaded: uploads to GPU via PointCloud::new (uses RenderDevice)
 /// - Render world: SplatNode runs prepare (GPU sort) + display (rasterize) each frame
-/// - Splat output goes to ViewTarget before Bevy's main opaque pass
+/// - Splat runs AFTER the mesh passes and depth-tests against the mesh depth buffer
+///   (read-only reverse-Z), then composites over the meshes for splat<->mesh occlusion.
 
 use bevy::prelude::*;
 use bevy::render::{
@@ -131,11 +132,12 @@ impl Plugin for SplatPlugin {
             .add_render_graph_node::<ViewNodeRunner<SplatNode>>(Core3d, SplatPassLabel)
             .add_render_graph_edges(
                 Core3d,
-                // Run splat BEFORE the main opaque pass so it fills the ViewTarget as a
-                // background. The camera uses ClearColorConfig::None (LoadOp::Load), so the
-                // opaque pass keeps the splat background and draws PBR meshes on top of it
-                // (meshes depth-test among themselves; splat has no depth = always behind).
-                (Node3d::StartMainPass, SplatPassLabel, Node3d::MainOpaquePass),
+                // Run splat AFTER the opaque/transparent mesh passes so the mesh depth buffer is
+                // fully populated. The splat rasterize then depth-tests each splat against the
+                // mesh depth (read-only, reverse-Z Greater): splats behind meshes are discarded,
+                // splats in front are composited over. The camera clears to black; splats fill
+                // the background wherever no mesh is present.
+                (Node3d::MainTransparentPass, SplatPassLabel, Node3d::EndMainPass),
             );
     }
 }
@@ -159,10 +161,15 @@ fn init_splat_gpu_state(
     let pc = PointCloud::new(device, raw).expect("Failed to create PointCloud");
     info!("  PointCloud: {} points, sh_deg={}, compressed={}", pc.num_points(), pc.sh_deg(), pc.compressed());
 
-    // Create renderer — intermediate rasterization format (linear)
+    // Create renderer — intermediate rasterization format (linear).
+    // depth_format = Bevy's CORE_3D_DEPTH_FORMAT (Depth32Float) so the rasterize pass can
+    // depth-test splats against the mesh depth buffer (read-only, reverse-Z) for occlusion.
     let splat_format = wgpu::TextureFormat::Rgba8Unorm;
     let renderer = pollster::block_on(
-        GaussianRenderer::new(device, queue, splat_format, pc.sh_deg(), pc.compressed())
+        GaussianRenderer::new_with_depth(
+            device, queue, splat_format, pc.sh_deg(), pc.compressed(),
+            Some(wgpu::TextureFormat::Depth32Float),
+        )
     );
 
     // Display compositor: source=Rgba8Unorm (splat rasterize), target=Rgba8UnormSrgb (ViewTarget)
@@ -260,13 +267,14 @@ impl ViewNode for SplatNode {
         &'static SplatCamera,
         &'static bevy::render::camera::ExtractedCamera,
         &'static bevy::render::view::ExtractedView,
+        &'static bevy::render::view::ViewDepthTexture,
     );
 
     fn run(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, _splat_camera, _extracted_camera, extracted_view): QueryItem<Self::ViewQuery>,
+        (view_target, _splat_camera, _extracted_camera, extracted_view, view_depth): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), bevy::render::render_graph::NodeRunError> {
         let Some(gpu_state) = world.get_resource::<SplatGpuState>() else {
@@ -317,10 +325,14 @@ impl ViewNode for SplatNode {
         let renderer_ptr = &mut state.renderer as *mut GaussianRenderer;
         let pc_ptr = &state.pc as *const PointCloud;
         let display_tex = state.display.texture() as *const wgpu::TextureView;
+        // Mesh depth buffer (written by the opaque pass). The splat pipeline tests against it
+        // read-only (never writes), so splats behind meshes are discarded while splat<->splat
+        // ordering stays handled by the GPU sort + front-to-back blend.
+        let depth_view = view_depth.view();
         unsafe {
             (*renderer_ptr).prepare(&mut encoder, device, queue, &*pc_ptr, args, &mut None);
 
-            // Rasterize splats to Display's intermediate texture
+            // Rasterize splats to Display's intermediate texture, depth-tested vs mesh depth
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("splat_rasterize"),
@@ -333,6 +345,15 @@ impl ViewNode for SplatNode {
                         },
                         depth_slice: None,
                     })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        // Load existing mesh depth; store is a no-op (pipeline depth_write=false)
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
                     ..Default::default()
                 });
                 (*renderer_ptr).render(&mut render_pass, &*pc_ptr);
@@ -347,12 +368,17 @@ impl ViewNode for SplatNode {
         let camera_uniform = state.renderer.camera();
         let settings = state.renderer.render_settings();
         let encoder = render_context.command_encoder();
-        state.display.render(
+        // Composite the splat intermediate OVER the meshes (premultiplied-alpha blend).
+        // clear=false (LoadOp::Load) keeps the mesh colors where splats are absent or were
+        // depth-discarded; splats in front of meshes blend on top.
+        state.display.render_to_region(
             encoder,
             target_view,
             state.args.background_color,
             camera_uniform,
             settings,
+            None,
+            false,
         );
 
         Ok(())

@@ -64,6 +64,8 @@ struct Splat {
     pos: u32,
     // rgba packed as u8
     color_0: u32,color_1: u32,
+    // depth in host clip space (reverse-Z NDC) for depth testing
+    depth: f32,
 };
 
 // struct DrawIndirect {
@@ -101,6 +103,8 @@ struct RenderSettings {
     kernel_size: f32,
     walltime: f32,
     scene_extend: f32,
+    // host renderer near plane; used to compute reverse-Z depth (0 disables)
+    bevy_near: f32,
     center: vec3<f32>,
 }
 
@@ -312,10 +316,14 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
 
     let store_idx = atomicAdd(&sort_infos.keys_size, 1u);
     let v = vec4<f32>(v1 / viewport, v2 / viewport);
+    // reverse-Z NDC depth in the host renderer's clip space (Bevy infinite reverse-Z:
+    // depth = near / view_z). camspace.z is the positive view-space distance.
+    let host_depth = render_settings.bevy_near / camspace.z;
     points_2d[store_idx] = Splat(
         pack2x16float(v.xy), pack2x16float(v.zw),
         pack2x16float(v_center.xy),
         pack2x16float(color.rg), pack2x16float(color.ba),
+        host_depth,
     );
     
     sort_depths[store_idx] = bitcast<u32>(pos2d.z);

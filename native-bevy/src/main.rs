@@ -126,17 +126,18 @@ fn setup(
             .looking_at(focus, Vec3::Z),
     ));
 
-    // Camera — SplatCamera marks it for gaussian splat background rendering.
-    // clear_color=None: the splat node fills the ViewTarget as background BEFORE the
-    // main opaque pass, which then loads it and draws the meshes on top.
+    // Camera — SplatCamera marks it for gaussian splat rendering.
+    // clear_color=black: meshes are drawn first into the cleared ViewTarget (writing the depth
+    // buffer), then the SplatNode (running after the mesh passes) rasterizes splats depth-tested
+    // against that mesh depth and composites them over, giving splat<->mesh occlusion.
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,
-        // No MSAA: the splat is rendered to the single-sample ViewTarget before the opaque
-        // pass. With MSAA on, the opaque pass's MSAA resolve would overwrite the splat.
+        // No MSAA: the splat rasterize uses a single-sample intermediate + the (single-sample)
+        // mesh depth buffer. With MSAA on, depth would be multisampled and mismatch the pass.
         Msaa::Off,
         Camera {
-            clear_color: ClearColorConfig::None,
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
         AmbientLight {
