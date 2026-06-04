@@ -37,11 +37,16 @@ pub struct SplatScene {
     loader: Option<JoinHandle<GenericGaussianPointCloud>>,
     pc_raw: Option<GenericGaussianPointCloud>,
     pub loaded: bool,
+    /// Robust scene center (plane-fit centroid) of the loaded cloud, in PLY coords. Because the
+    /// splat node passes the Bevy camera POSITION through unchanged (only rotation is converted),
+    /// PLY coords == Bevy world coords for positions, so this is directly usable as a Bevy-space
+    /// orbit focus / default spawn point. `None` until loading completes.
+    pub scene_center: Option<[f32; 3]>,
 }
 
 impl Default for SplatScene {
     fn default() -> Self {
-        Self { ply_path: None, loader: None, pc_raw: None, loaded: false }
+        Self { ply_path: None, loader: None, pc_raw: None, loaded: false, scene_center: None }
     }
 }
 
@@ -65,7 +70,15 @@ impl SplatScene {
                 let h = self.loader.take().unwrap();
                 self.pc_raw = Some(h.join().unwrap());
                 self.loaded = true;
-                info!("PLY loaded: {} points", self.pc_raw.as_ref().unwrap().num_points);
+                if let Some(pc) = &self.pc_raw {
+                    self.scene_center = Some([pc.center.x, pc.center.y, pc.center.z]);
+                    info!(
+                        "PLY loaded: {} points, center {:?}, bbox radius {:.1}",
+                        pc.num_points,
+                        self.scene_center.unwrap(),
+                        pc.aabb.radius()
+                    );
+                }
                 return true;
             }
         }
