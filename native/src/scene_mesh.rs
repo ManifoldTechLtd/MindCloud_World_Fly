@@ -113,8 +113,8 @@ impl MeshRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh_pipeline_layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
         });
 
         let vtx_layout = wgpu::VertexBufferLayout {
@@ -151,8 +151,8 @@ impl MeshRenderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
+            multiview: None,
             cache: None,
-            multiview_mask: None,
         });
 
         Self { line_pipeline, uniform_buf, uniform_bind_group }

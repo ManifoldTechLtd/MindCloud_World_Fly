@@ -70,21 +70,20 @@ pub(crate) fn ui(state: &mut WindowContext) -> bool {
                 .allow_scroll(false)
                 .y_axis_min_width(1.0)
                 .y_axis_label("ms")
-                .auto_bounds(Vec2b::TRUE)
+                .auto_bounds(egui::Vec2b::new(true, true))
                 .show_axes([false, true])
                 .legend(
                     Legend::default()
-                        .text_style(TextStyle::Body)
                         .background_alpha(1.)
                         .position(egui_plot::Corner::LeftBottom),
                 )
-                .show(ui, |ui| {
+                .show(ui, |plot_ui| {
                     let line = egui_plot::Line::new("preprocess", PlotPoints::from_ys_f32(&pre));
-                    ui.line(line);
+                    plot_ui.line(line);
                     let line = egui_plot::Line::new("sorting", PlotPoints::from_ys_f32(&sort));
-                    ui.line(line);
+                    plot_ui.line(line);
                     let line = egui_plot::Line::new("rasterize", PlotPoints::from_ys_f32(&rast));
-                    ui.line(line);
+                    plot_ui.line(line);
                 });
         });
 

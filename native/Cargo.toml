@@ -10,7 +10,7 @@ description = "MindCloud World Fly — native split-screen FPV drone racing simu
 web_splats = { path = "web-splat" }
 
 # Core
-wgpu = "29.0.1"
+wgpu = "27.0"
 winit = "0.30.12"
 pollster = { version = "0.4.0", features = ["macro"] }
 env_logger = "0.11"
@@ -22,9 +22,9 @@ bytemuck = { version = "1.25", features = ["derive"] }
 cgmath = { version = "0.18.0", features = ["bytemuck"], git = "https://github.com/rustgd/cgmath" }
 
 # UI
-egui = "0.34.0"
-egui-wgpu = "0.34.0"
-egui-winit = { version = "0.34.0", default-features = false }
+egui = "0.33.0"
+egui-wgpu = "0.33.3"
+egui-winit = { version = "0.33.0", default-features = false }
 
 # Input
 hidapi = "2.6"

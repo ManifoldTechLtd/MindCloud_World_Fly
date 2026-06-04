@@ -63,7 +63,7 @@ unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 impl GPURSSorter {
     // The new call also needs the queue to be able to determine the maximum subgroup size (Does so by running test runs)
     pub async fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let sg_size = device.adapter_info().subgroup_min_size;
+        let sg_size = 0u32; // wgpu 27 does not expose adapter_info on Device; fallback to search
         if sg_size == 0 || sg_size > 512 {
             let mut cur_sorter: GPURSSorter;
 
@@ -195,8 +195,9 @@ impl GPURSSorter {
         let pipeline_layout: wgpu::PipelineLayout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("radix sort pipeline layout"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+                
             });
 
         let raw_shader: &str = include_str!("shaders/radix_sort.wgsl");

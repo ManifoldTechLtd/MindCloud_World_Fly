@@ -40,10 +40,11 @@ impl GaussianRenderer {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("render pipeline layout"),
             bind_group_layouts: &[
-                Some(&PointCloud::bind_group_layout_render(device)), // Needed for points_2d (on binding 2)
-                Some(&GPURSSorter::bind_group_layout_rendering(device)), // Needed for indices   (on binding 4)
+                &PointCloud::bind_group_layout_render(device), // Needed for points_2d (on binding 2)
+                &GPURSSorter::bind_group_layout_rendering(device), // Needed for indices   (on binding 4)
             ],
-            immediate_size: 0,
+            push_constant_ranges: &[],
+            
         });
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/gaussian.wgsl"));
@@ -93,7 +94,7 @@ impl GaussianRenderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             cache: None,
-            multiview_mask: None,
+            multiview: None,
         });
 
         let draw_indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -363,18 +364,19 @@ impl PreprocessPipeline {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("preprocess pipeline layout"),
             bind_group_layouts: &[
-                Some(&UniformBuffer::<CameraUniform>::bind_group_layout(device)),
-                Some(&if !compressed {
+                &UniformBuffer::<CameraUniform>::bind_group_layout(device),
+                &if !compressed {
                     PointCloud::bind_group_layout(device)
                 } else {
                     PointCloud::bind_group_layout_compressed(device)
-                }),
-                Some(&GPURSSorter::bind_group_layout_preprocess(device)),
-                Some(&UniformBuffer::<SplattingArgsUniform>::bind_group_layout(
+                },
+                &GPURSSorter::bind_group_layout_preprocess(device),
+                &UniformBuffer::<SplattingArgsUniform>::bind_group_layout(
                     device,
-                )),
+                ),
             ],
-            immediate_size: 0,
+            push_constant_ranges: &[],
+            
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -448,13 +450,14 @@ impl Display {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("display pipeline layout"),
             bind_group_layouts: &[
-                Some(&Self::bind_group_layout(device)),
-                Some(&UniformBuffer::<CameraUniform>::bind_group_layout(device)),
-                Some(&UniformBuffer::<SplattingArgsUniform>::bind_group_layout(
+                &Self::bind_group_layout(device),
+                &UniformBuffer::<CameraUniform>::bind_group_layout(device),
+                &UniformBuffer::<SplattingArgsUniform>::bind_group_layout(
                     device,
-                )),
+                ),
             ],
-            immediate_size: 0,
+            push_constant_ranges: &[],
+            
         });
         let shader = device.create_shader_module(include_wgsl!("shaders/display.wgsl"));
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -482,7 +485,7 @@ impl Display {
                 })],
                 compilation_options: Default::default(),
             }),
-            multiview_mask: None,
+            multiview: None,
             cache: None,
         });
         let (view, bind_group) = Self::create_render_target(device, source_format, width, height);

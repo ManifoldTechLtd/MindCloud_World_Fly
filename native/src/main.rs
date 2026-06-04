@@ -272,7 +272,7 @@ async fn main() {
                                 egui_st.handle_platform_output(&*window, output.platform_output.clone());
 
                                 // Render menu egui
-                                if let wgpu::CurrentSurfaceTexture::Success(frame)|wgpu::CurrentSurfaceTexture::Suboptimal(frame) = gpu.surface.get_current_texture() {
+                                if let Ok(frame) = gpu.surface.get_current_texture() {
                                     let view = frame.texture.create_view(&Default::default());
                                     let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:None});
                                     let screen = egui_wgpu::ScreenDescriptor{size_in_pixels:[gpu.config.width,gpu.config.height],pixels_per_point:window.scale_factor() as f32};
@@ -325,7 +325,7 @@ async fn main() {
                                     menu_ui::draw_loading_screen(&egui_ctx, &fname);
                                     let output = egui_ctx.end_pass();
                                     egui_st.handle_platform_output(&*window, output.platform_output.clone());
-                                    if let wgpu::CurrentSurfaceTexture::Success(frame)|wgpu::CurrentSurfaceTexture::Suboptimal(frame) = gpu.surface.get_current_texture() {
+                                    if let Ok(frame) = gpu.surface.get_current_texture() {
                                         let view = frame.texture.create_view(&Default::default());
                                         let mut enc = gpu.device().create_command_encoder(&wgpu::CommandEncoderDescriptor{label:None});
                                         let screen = egui_wgpu::ScreenDescriptor{size_in_pixels:[gpu.config.width,gpu.config.height],pixels_per_point:window.scale_factor() as f32};
