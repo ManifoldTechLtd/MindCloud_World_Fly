@@ -31,6 +31,8 @@ bevy_panorbit_camera = "0.34"
 clap = { version = "4.6", features = ["derive"] }
 pollster = "0.4"
 bytemuck = { version = "1.25", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 cgmath = { version = "0.18.0", features = ["bytemuck"], git = "https://github.com/rustgd/cgmath" }
 wgpu = "27.0"
 

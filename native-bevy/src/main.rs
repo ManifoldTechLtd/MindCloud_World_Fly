@@ -6,6 +6,7 @@
 /// - Both share the same wgpu 27 Device
 
 mod app_state;
+mod persistence;
 mod splat_plugin;
 
 use bevy::prelude::*;
@@ -16,8 +17,9 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use clap::Parser;
 use std::f32::consts::FRAC_PI_2;
 
-use app_state::{AppState, GameMode};
+use app_state::{AppState, CurrentSceneConfig, GameMode, SceneConfig, WorldUp};
 use splat_plugin::{SplatPlugin, SplatCamera};
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(name = "mindcloud-fly-bevy", about = "MindCloud Fly — Bevy + web-splat hybrid")]
@@ -33,6 +35,10 @@ struct Args {
     /// Split-screen (two players). Default is single-player (one full-window view).
     #[arg(long)]
     split: bool,
+
+    /// World up convention: `zup` (default) or `colmap` (Y-down). Overrides the per-scene config.
+    #[arg(long, value_name = "zup|colmap")]
+    world_up: Option<String>,
 }
 
 fn main() {
@@ -69,14 +75,16 @@ fn main() {
     // to Loading; without it we sit in ModeSelect until the menu slice (Phase 8) lands.
     let mode = if args.split { GameMode::SplitScreen } else { GameMode::SinglePlayer };
     let initial = if args.input.is_some() { AppState::Loading } else { AppState::ModeSelect };
+    let world_up_override = args.world_up.as_deref().map(WorldUp::parse);
     app.insert_resource(mode);
-    app.insert_resource(SceneInput { path: args.input });
+    app.insert_resource(SceneInput { path: args.input, world_up_override });
     app.insert_state(initial);
 
     app.add_systems(OnEnter(AppState::ModeSelect), announce_mode_select);
     app.add_systems(OnEnter(AppState::Loading), start_loading);
     app.add_systems(Update, advance_when_loaded.run_if(in_state(AppState::Loading)));
-    app.add_systems(OnEnter(AppState::Placement), setup_scene);
+    // init_scene_config loads/persists the per-scene config before the scene is built.
+    app.add_systems(OnEnter(AppState::Placement), (init_scene_config, setup_scene).chain());
     app.add_systems(Update, (update_window_title, set_split_viewports));
     app.run();
 }
@@ -84,6 +92,8 @@ fn main() {
 #[derive(Resource)]
 struct SceneInput {
     path: Option<String>,
+    /// CLI `--world-up` override applied to the loaded per-scene config (None = use persisted value).
+    world_up_override: Option<WorldUp>,
 }
 
 /// While in `ModeSelect`: hint how to start (rich menu UI is a later migration slice — Phase 8).
@@ -108,6 +118,29 @@ fn advance_when_loaded(
         info!("[Loading] splat ready -> Placement");
         next.set(AppState::Placement);
     }
+}
+
+/// `OnEnter(Placement)`: load this scene's persisted config (`world_up`/`spawn`/`heading`), apply
+/// any `--world-up` CLI override, store it as `CurrentSceneConfig`, and write it back (a round-trip
+/// that also creates `scenes.json` on first run). Placement + flight read this resource.
+fn init_scene_config(mut commands: Commands, scene_input: Res<SceneInput>) {
+    let mut config = match &scene_input.path {
+        Some(p) => persistence::load_scene_config(&persistence::scene_key(Path::new(p))),
+        None => SceneConfig::default(),
+    };
+    if let Some(wu) = scene_input.world_up_override {
+        config.world_up = wu;
+    }
+    if let Some(p) = &scene_input.path {
+        if let Err(e) = persistence::save_scene_config(&persistence::scene_key(Path::new(p)), &config) {
+            warn!("[Placement] failed to save scene config: {e}");
+        }
+    }
+    info!(
+        "[Placement] scene config: world_up={:?} spawn={:?} heading={:.1} deg",
+        config.world_up, config.spawn, config.heading_deg
+    );
+    commands.insert_resource(CurrentSceneConfig(config));
 }
 
 /// `OnEnter(Placement)`: build the scene (demo PBR objects + lighting) and spawn the camera(s) for
