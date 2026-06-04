@@ -10,6 +10,7 @@ mod splat_plugin;
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::camera::Viewport;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use clap::Parser;
 
@@ -52,10 +53,14 @@ fn main() {
     app.add_plugins(SplatPlugin);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default());
 
+    // Black void color. With two cameras on one window target, the order-0 camera clears the
+    // shared target to this color and the order-1 camera loads it (ClearColorConfig::Default),
+    // so neither viewport erases the other.
+    app.insert_resource(ClearColor(Color::BLACK));
     app.insert_resource(SceneInput { path: args.input });
 
     app.add_systems(Startup, setup);
-    app.add_systems(Update, update_window_title);
+    app.add_systems(Update, (update_window_title, set_split_viewports));
     app.run();
 }
 
@@ -126,36 +131,80 @@ fn setup(
             .looking_at(focus, Vec3::Z),
     ));
 
-    // Camera — SplatCamera marks it for gaussian splat rendering.
-    // clear_color=black: meshes are drawn first into the cleared ViewTarget (writing the depth
-    // buffer), then the SplatNode (running after the mesh passes) rasterizes splats depth-tested
-    // against that mesh depth and composites them over, giving splat<->mesh occlusion.
-    commands.spawn((
-        Camera3d::default(),
-        Tonemapping::None,
-        // No MSAA: the splat rasterize uses a single-sample intermediate + the (single-sample)
-        // mesh depth buffer. With MSAA on, depth would be multisampled and mismatch the pass.
-        Msaa::Off,
-        Camera {
-            clear_color: ClearColorConfig::Custom(Color::BLACK),
-            ..default()
-        },
-        AmbientLight {
-            color: Color::WHITE,
-            brightness: 400.0,
-            ..default()
-        },
-        Transform::from_translation(focus + Vec3::new(5.0, 0.0, 3.0)).looking_at(focus, Vec3::Z),
-        PanOrbitCamera {
-            focus,
-            radius: Some(45.0),
-            ..default()
-        },
-        SplatCamera,
-    ));
+    // --- Split-screen: two stacked cameras (top = player 0, bottom = player 1) ---
+    // Each renders the full scene (splat + PBR meshes) into its own viewport half of the shared
+    // window target. `set_split_viewports` (re)assigns the viewport rects every frame; the
+    // SplatNode reads each camera's viewport and restricts the splat raster to it.
+    // Both cameras have PanOrbitCamera with distinct initial yaw, so bevy_panorbit_camera routes
+    // mouse input per-viewport (hovering a half controls that half's camera).
+    //
+    // No MSAA: the splat rasterize uses a single-sample intermediate + the single-sample mesh
+    // depth buffer; MSAA would multisample depth and mismatch the splat pass.
+    for (index, order, yaw) in [(0u8, 0isize, 0.0f32), (1u8, 1isize, std::f32::consts::FRAC_PI_2)] {
+        commands.spawn((
+            Camera3d::default(),
+            Camera { order, ..default() },
+            Tonemapping::None,
+            Msaa::Off,
+            AmbientLight {
+                color: Color::WHITE,
+                brightness: 400.0,
+                ..default()
+            },
+            Transform::from_translation(focus + Vec3::new(5.0, 0.0, 3.0)).looking_at(focus, Vec3::Z),
+            PanOrbitCamera {
+                focus,
+                radius: Some(45.0),
+                yaw: Some(yaw),
+                pitch: Some(-0.3),
+                ..default()
+            },
+            SplatCamera,
+            SplitCamera { index },
+        ));
+    }
 
-    info!("=== Bevy + web-splat hybrid: splat background + PBR meshes ===");
-    info!("Controls: Left-drag=orbit, Right-drag=pan, Scroll=zoom");
+    info!("=== Bevy + web-splat hybrid: SPLIT-SCREEN (2 viewports) + PBR meshes ===");
+    info!("Controls: hover a viewport, then Left-drag=orbit, Right-drag=pan, Scroll=zoom");
+}
+
+/// Marks a camera as one half of the split screen. `index` 0 = top, 1 = bottom.
+#[derive(Component)]
+struct SplitCamera {
+    index: u8,
+}
+
+/// Assigns each split-screen camera its viewport rect (top/bottom half) based on the current
+/// window size. Runs every frame but only writes when the rect actually changes (so window
+/// resizes are handled without spamming change detection).
+fn set_split_viewports(
+    windows: Query<&Window>,
+    mut cameras: Query<(&SplitCamera, &mut Camera)>,
+) {
+    let Ok(window) = windows.single() else { return; };
+    let w = window.physical_width();
+    let h = window.physical_height();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let half = h / 2;
+    for (split, mut cam) in &mut cameras {
+        let (pos, size) = match split.index {
+            0 => (UVec2::new(0, 0), UVec2::new(w, half)),
+            _ => (UVec2::new(0, half), UVec2::new(w, h.saturating_sub(half))),
+        };
+        let needs_update = match &cam.viewport {
+            Some(v) => v.physical_position != pos || v.physical_size != size,
+            None => true,
+        };
+        if needs_update {
+            cam.viewport = Some(Viewport {
+                physical_position: pos,
+                physical_size: size,
+                depth: 0.0..1.0,
+            });
+        }
+    }
 }
 
 fn update_window_title(

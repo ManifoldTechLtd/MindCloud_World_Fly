@@ -24,6 +24,7 @@ use web_splats::io::GenericGaussianPointCloud;
 
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::collections::HashMap;
 
 /// Marker component for cameras that should render gaussian splats
 #[derive(Component, Default, Clone, bevy::render::extract_component::ExtractComponent)]
@@ -85,12 +86,25 @@ pub struct SplatGpuState {
 }
 
 struct SplatGpuInner {
+    /// Shared, read-only during rendering — all views rasterize the same gaussians.
+    pc: PointCloud,
+    /// Template args; camera / projection / viewport are overwritten per view each frame.
+    args: SplattingArgs,
+    splat_format: wgpu::TextureFormat,
+    target_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    /// Per-view GPU state keyed by the frame-stable RetainedViewEntity. Each split-screen view
+    /// owns its own GaussianRenderer (sort + indirect-draw scratch) and Display (intermediate +
+    /// compositor); sharing one renderer across two views in a frame caused a GPU device loss.
+    views: HashMap<bevy::render::view::RetainedViewEntity, ViewSplat>,
+}
+
+/// Per-view splat GPU resources (the PointCloud is shared, held in SplatGpuInner).
+struct ViewSplat {
     renderer: GaussianRenderer,
     display: Display,
-    pc: PointCloud,
-    args: SplattingArgs,
-    display_width: u32,
-    display_height: u32,
+    width: u32,
+    height: u32,
 }
 
 /// Shared state between main world and render world for initialization
@@ -125,9 +139,16 @@ impl Plugin for SplatPlugin {
         render_app
             .add_systems(
                 bevy::render::Render,
-                init_splat_gpu_state
-                    .in_set(bevy::render::RenderSystems::PrepareResources)
-                    .run_if(not(resource_exists::<SplatGpuState>)),
+                (
+                    init_splat_gpu_state.run_if(not(resource_exists::<SplatGpuState>)),
+                    // Create per-view renderers AFTER init, once SplatGpuState exists. Runs as a
+                    // system (not in the render graph) because GPURSSorter creation submits +
+                    // polls the device, which would deadlock inside a render-graph node.
+                    prepare_splat_views
+                        .after(init_splat_gpu_state)
+                        .run_if(resource_exists::<SplatGpuState>),
+                )
+                    .in_set(bevy::render::RenderSystems::PrepareResources),
             )
             .add_render_graph_node::<ViewNodeRunner<SplatNode>>(Core3d, SplatPassLabel)
             .add_render_graph_edges(
@@ -147,7 +168,6 @@ fn init_splat_gpu_state(
     mut commands: Commands,
     init_data: Res<SplatInitData>,
     render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
 ) {
     let mut raw_lock = init_data.raw.lock().unwrap();
     let Some(raw) = raw_lock.take() else { return; };
@@ -155,33 +175,20 @@ fn init_splat_gpu_state(
     info!("Initializing splat GPU state ({} points, {}x{})", raw.num_points, init_data.width, init_data.height);
 
     let device = render_device.wgpu_device();
-    let queue: &wgpu::Queue = &**render_queue;
 
     // Create PointCloud (uploads gaussian data to GPU)
     let pc = PointCloud::new(device, raw).expect("Failed to create PointCloud");
     info!("  PointCloud: {} points, sh_deg={}, compressed={}", pc.num_points(), pc.sh_deg(), pc.compressed());
 
-    // Create renderer — intermediate rasterization format (linear).
-    // depth_format = Bevy's CORE_3D_DEPTH_FORMAT (Depth32Float) so the rasterize pass can
-    // depth-test splats against the mesh depth buffer (read-only, reverse-Z) for occlusion.
+    // Per-view GaussianRenderer + Display are created lazily in `prepare_splat_views` (one per
+    // camera/viewport), all sharing this PointCloud. Record the formats they need:
+    //  - splat_format: intermediate rasterization format (linear Rgba8Unorm).
+    //  - depth_format: Bevy CORE_3D_DEPTH_FORMAT (Depth32Float) so the rasterize pass can
+    //    depth-test splats against the mesh depth buffer (read-only, reverse-Z) for occlusion.
+    //  - target_format: Bevy non-HDR ViewTarget format (Rgba8UnormSrgb).
     let splat_format = wgpu::TextureFormat::Rgba8Unorm;
-    let renderer = pollster::block_on(
-        GaussianRenderer::new_with_depth(
-            device, queue, splat_format, pc.sh_deg(), pc.compressed(),
-            Some(wgpu::TextureFormat::Depth32Float),
-        )
-    );
-
-    // Display compositor: source=Rgba8Unorm (splat rasterize), target=Rgba8UnormSrgb (ViewTarget)
-    // Bevy's non-HDR main_texture_format is Rgba8UnormSrgb (bevy_default).
     let target_format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let display = Display::new(
-        device,
-        splat_format,
-        target_format,
-        init_data.width,
-        init_data.height,
-    );
+    let depth_format = wgpu::TextureFormat::Depth32Float;
 
     // Initial camera from bounding box
     let aabb = pc.bbox();
@@ -223,16 +230,66 @@ fn init_splat_gpu_state(
 
     commands.insert_resource(SplatGpuState {
         inner: Mutex::new(SplatGpuInner {
-            renderer,
-            display,
             pc,
             args,
-            display_width: init_data.width,
-            display_height: init_data.height,
+            splat_format,
+            target_format,
+            depth_format,
+            views: HashMap::new(),
         }),
     });
 
     info!("Splat GPU state initialized!");
+}
+
+/// Render-world system: ensure every `SplatCamera` view has its own `GaussianRenderer` + `Display`,
+/// keyed by the frame-stable `RetainedViewEntity`. Runs as a system (safe to submit+poll the device
+/// for sorter setup) rather than inside the render-graph node (which must not block).
+fn prepare_splat_views(
+    gpu_state: Option<Res<SplatGpuState>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    views: Query<
+        (
+            &bevy::render::view::ExtractedView,
+            &bevy::render::camera::ExtractedCamera,
+        ),
+        With<SplatCamera>,
+    >,
+) {
+    let Some(gpu_state) = gpu_state else { return; };
+    let mut state = gpu_state.inner.lock().unwrap();
+    let device = render_device.wgpu_device();
+    let queue: &wgpu::Queue = &**render_queue;
+
+    for (extracted_view, extracted_camera) in &views {
+        let key = extracted_view.retained_view_entity;
+        if state.views.contains_key(&key) {
+            continue;
+        }
+        // Size the per-view intermediate to the FULL render target (matches Bevy's depth texture).
+        let size = extracted_camera
+            .physical_target_size
+            .unwrap_or(UVec2::new(1280, 720));
+        let (w, h) = (size.x.max(1), size.y.max(1));
+        let sh_deg = state.pc.sh_deg();
+        let compressed = state.pc.compressed();
+        let (sf, tf, df) = (state.splat_format, state.target_format, state.depth_format);
+        info!("Creating per-view splat renderer for {:?} ({}x{})", key, w, h);
+        let renderer = pollster::block_on(GaussianRenderer::new_with_depth(
+            device, queue, sf, sh_deg, compressed, Some(df),
+        ));
+        let display = Display::new(device, sf, tf, w, h);
+        state.views.insert(
+            key,
+            ViewSplat {
+                renderer,
+                display,
+                width: w,
+                height: h,
+            },
+        );
+    }
 }
 
 /// Main-world system: polls PLY loading and pushes data to SplatInitData
@@ -274,7 +331,7 @@ impl ViewNode for SplatNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, _splat_camera, _extracted_camera, extracted_view, view_depth): QueryItem<Self::ViewQuery>,
+        (view_target, _splat_camera, extracted_camera, extracted_view, view_depth): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), bevy::render::render_graph::NodeRunError> {
         let Some(gpu_state) = world.get_resource::<SplatGpuState>() else {
@@ -286,20 +343,35 @@ impl ViewNode for SplatNode {
         let device = render_context.render_device().wgpu_device();
         let queue: &wgpu::Queue = &**world.resource::<RenderQueue>();
 
-        // Update viewport size and resize display texture if needed
+        // --- Resolve sizes (split-screen aware) ---
+        // Bevy sizes the ViewTarget AND the mesh depth texture to the FULL render target (window),
+        // even for viewport cameras. The splat raster pass binds the mesh depth as its depth
+        // attachment, so its color target (our intermediate) must match the full target size.
         let target_size = view_target.main_texture().size();
-        let vp_w = target_size.width;
-        let vp_h = target_size.height;
-        state.args.viewport = cgmath::Vector2::new(vp_w, vp_h);
+        let full_w = target_size.width.max(1);
+        let full_h = target_size.height.max(1);
 
-        if state.display_width != vp_w || state.display_height != vp_h {
-            state.display.resize(device, vp_w, vp_h);
-            state.display_width = vp_w;
-            state.display_height = vp_h;
-            state.args.camera.projection.resize(vp_w, vp_h);
+        // This camera's viewport sub-rect within the target. None => single full-window camera.
+        let (vp_x, vp_y, vp_w, vp_h) = match extracted_camera.viewport.as_ref() {
+            Some(vp) => (
+                vp.physical_position.x as f32,
+                vp.physical_position.y as f32,
+                vp.physical_size.x.max(1) as f32,
+                vp.physical_size.y.max(1) as f32,
+            ),
+            None => (0.0, 0.0, full_w as f32, full_h as f32),
+        };
+
+        // Per-view GPU state (created by prepare_splat_views). Skip until it's ready.
+        let key = extracted_view.retained_view_entity;
+        if !state.views.contains_key(&key) {
+            return Ok(());
         }
 
-        // Sync camera from Bevy's ExtractedView.
+        // 2D splat sizing uses the viewport resolution; set_viewport maps NDC into the sub-rect.
+        state.args.viewport = cgmath::Vector2::new(vp_w as u32, vp_h as u32);
+
+        // Sync camera position + rotation from Bevy's ExtractedView.
         // Bevy uses OpenGL convention (camera looks -Z, +Y up).
         // web-splat uses COLMAP convention (camera looks +Z, +Y down).
         // Conversion: rotate camera basis 180° about X (flips Y and Z).
@@ -311,28 +383,55 @@ impl ViewNode for SplatNode {
             state.args.camera.position = cgmath::Point3::new(bevy_pos.x, bevy_pos.y, bevy_pos.z);
             state.args.camera.rotation = bevy_q * flip_x;
         }
-        // Use fixed near/far — bbox has outliers that push near plane too far
-        state.args.camera.projection.znear = 0.1;
-        state.args.camera.projection.zfar = 5000.0;
-
-        // --- Prepare (GPU sort) + Rasterize in our own encoder ---
+        // Derive fov + near DIRECTLY from Bevy's projection matrix so the splat frustum matches the
+        // meshes for ANY viewport aspect (split-screen halves are very wide). web-splat's own
+        // resize() heuristic anchors fovx when w>h, which diverges hard from Bevy's fixed fovy.
+        // Perspective infinite-reverse-z (column-major): m00 = f/aspect, m11 = f = 1/tan(fovy/2),
+        // near = clip_from_view[3][2]. => fovx = 2*atan(1/m00), fovy = 2*atan(1/m11).
+        {
+            let p = extracted_view.clip_from_view;
+            let m00 = p.x_axis.x;
+            let m11 = p.y_axis.y;
+            if m00.abs() > 1e-6 && m11.abs() > 1e-6 {
+                state.args.camera.projection.fovx = cgmath::Rad(2.0 * (1.0 / m00).abs().atan());
+                state.args.camera.projection.fovy = cgmath::Rad(2.0 * (1.0 / m11).abs().atan());
+            }
+            // Bevy's actual near plane drives the reverse-Z depth used for splat<->mesh occlusion.
+            state.args.camera.projection.znear = p.w_axis.z.abs().max(1e-4);
+            state.args.camera.projection.zfar = 5000.0;
+        }
         let args = state.args;
+
+        // Resize this view's intermediate to the full target (matches the mesh depth attachment).
+        {
+            let view = state.views.get_mut(&key).unwrap();
+            if view.width != full_w || view.height != full_h {
+                view.display.resize(device, full_w, full_h);
+                view.width = full_w;
+                view.height = full_h;
+            }
+        }
+
+        // --- Prepare (GPU sort) + rasterize + composite, in ONE encoder for THIS view ---
+        // Each view has independent GPU state (own renderer + intermediate), so there is no shared
+        // mutable resource and no cross-view ordering hazard.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("splat_prepare_raster"),
+            label: Some("splat_prepare_raster_composite"),
         });
 
-        // Split borrows: raw pointers to avoid simultaneous &mut renderer + &pc
-        let renderer_ptr = &mut state.renderer as *mut GaussianRenderer;
+        // Split borrows through the MutexGuard via raw pointers (renderer is &mut, pc/display are &).
+        let renderer_ptr = &mut state.views.get_mut(&key).unwrap().renderer as *mut GaussianRenderer;
+        let display_tex = state.views.get(&key).unwrap().display.texture() as *const wgpu::TextureView;
         let pc_ptr = &state.pc as *const PointCloud;
-        let display_tex = state.display.texture() as *const wgpu::TextureView;
-        // Mesh depth buffer (written by the opaque pass). The splat pipeline tests against it
+        // Mesh depth buffer (written by the mesh passes). The splat pipeline tests against it
         // read-only (never writes), so splats behind meshes are discarded while splat<->splat
         // ordering stays handled by the GPU sort + front-to-back blend.
         let depth_view = view_depth.view();
         unsafe {
             (*renderer_ptr).prepare(&mut encoder, device, queue, &*pc_ptr, args, &mut None);
 
-            // Rasterize splats to Display's intermediate texture, depth-tested vs mesh depth
+            // Rasterize splats into this view's full-window intermediate, depth-tested vs mesh
+            // depth, restricted to the camera's viewport sub-rect (rest stays transparent).
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("splat_rasterize"),
@@ -356,30 +455,31 @@ impl ViewNode for SplatNode {
                     }),
                     ..Default::default()
                 });
+                render_pass.set_viewport(vp_x, vp_y, vp_w, vp_h, 0.0, 1.0);
                 (*renderer_ptr).render(&mut render_pass, &*pc_ptr);
             }
         }
 
-        // Submit prepare+rasterize as a command buffer in Bevy's queue (ordered before composite)
-        render_context.add_command_buffer(encoder.finish());
+        // Composite this view's intermediate OVER the meshes (premultiplied-alpha blend,
+        // LoadOp::Load keeps mesh colors where splats are absent or depth-discarded). The
+        // intermediate maps 1:1 to the full-window ViewTarget, so a FULL-SCREEN composite
+        // (region=None) lands this view's sub-rect content in place; the transparent remainder is a
+        // no-op and preserves the other viewport. Same encoder, after the raster pass.
+        {
+            let view = state.views.get(&key).unwrap();
+            let target_view: &wgpu::TextureView = view_target.main_texture_view();
+            view.display.render_to_region(
+                &mut encoder,
+                target_view,
+                args.background_color,
+                view.renderer.camera(),
+                view.renderer.render_settings(),
+                None,
+                false,
+            );
+        }
 
-        // --- Composite to ViewTarget using Bevy's encoder ---
-        let target_view: &wgpu::TextureView = view_target.main_texture_view();
-        let camera_uniform = state.renderer.camera();
-        let settings = state.renderer.render_settings();
-        let encoder = render_context.command_encoder();
-        // Composite the splat intermediate OVER the meshes (premultiplied-alpha blend).
-        // clear=false (LoadOp::Load) keeps the mesh colors where splats are absent or were
-        // depth-discarded; splats in front of meshes blend on top.
-        state.display.render_to_region(
-            encoder,
-            target_view,
-            state.args.background_color,
-            camera_uniform,
-            settings,
-            None,
-            false,
-        );
+        render_context.add_command_buffer(encoder.finish());
 
         Ok(())
     }
