@@ -12,6 +12,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_log",
     "bevy_pbr",
     "bevy_render",
+    "bevy_state",
     "bevy_winit",
     "multi_threaded",
     "std",

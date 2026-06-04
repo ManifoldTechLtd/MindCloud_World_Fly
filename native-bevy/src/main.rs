@@ -5,6 +5,7 @@
 /// - web-splat renders Gaussian Splat scene as background (via SplatPlugin)
 /// - Both share the same wgpu 27 Device
 
+mod app_state;
 mod splat_plugin;
 
 use bevy::prelude::*;
@@ -13,7 +14,9 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::camera::Viewport;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use clap::Parser;
+use std::f32::consts::FRAC_PI_2;
 
+use app_state::{AppState, GameMode};
 use splat_plugin::{SplatPlugin, SplatCamera};
 
 #[derive(Parser, Debug)]
@@ -26,6 +29,10 @@ struct Args {
     /// Disable vsync
     #[arg(long)]
     no_vsync: bool,
+
+    /// Split-screen (two players). Default is single-player (one full-window view).
+    #[arg(long)]
+    split: bool,
 }
 
 fn main() {
@@ -57,9 +64,19 @@ fn main() {
     // shared target to this color and the order-1 camera loads it (ClearColorConfig::Default),
     // so neither viewport erases the other.
     app.insert_resource(ClearColor(Color::BLACK));
-    app.insert_resource(SceneInput { path: args.input });
 
-    app.add_systems(Startup, setup);
+    // Game mode + initial state. With `--input` we skip the (not-yet-built) menus and jump straight
+    // to Loading; without it we sit in ModeSelect until the menu slice (Phase 8) lands.
+    let mode = if args.split { GameMode::SplitScreen } else { GameMode::SinglePlayer };
+    let initial = if args.input.is_some() { AppState::Loading } else { AppState::ModeSelect };
+    app.insert_resource(mode);
+    app.insert_resource(SceneInput { path: args.input });
+    app.insert_state(initial);
+
+    app.add_systems(OnEnter(AppState::ModeSelect), announce_mode_select);
+    app.add_systems(OnEnter(AppState::Loading), start_loading);
+    app.add_systems(Update, advance_when_loaded.run_if(in_state(AppState::Loading)));
+    app.add_systems(OnEnter(AppState::Placement), setup_scene);
     app.add_systems(Update, (update_window_title, set_split_viewports));
     app.run();
 }
@@ -69,18 +86,38 @@ struct SceneInput {
     path: Option<String>,
 }
 
-fn setup(
+/// While in `ModeSelect`: hint how to start (rich menu UI is a later migration slice — Phase 8).
+fn announce_mode_select() {
+    info!("[ModeSelect] No scene loaded. Pass `--input <scene.ply>` (optionally `--split`) to start. Menu UI is a later slice.");
+}
+
+/// `OnEnter(Loading)`: kick off the background PLY load (the splat plugin loads on a worker thread).
+fn start_loading(scene_input: Res<SceneInput>, mut splat_scene: ResMut<splat_plugin::SplatScene>) {
+    if let Some(ref path) = scene_input.path {
+        info!("[Loading] starting PLY background load: {}", path);
+        splat_scene.start_loading(path.clone());
+    }
+}
+
+/// Update while in `Loading`: advance to `Placement` once the splat is uploaded to the GPU.
+fn advance_when_loaded(
+    splat_scene: Res<splat_plugin::SplatScene>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    if splat_scene.loaded {
+        info!("[Loading] splat ready -> Placement");
+        next.set(AppState::Placement);
+    }
+}
+
+/// `OnEnter(Placement)`: build the scene (demo PBR objects + lighting) and spawn the camera(s) for
+/// the current `GameMode` (SinglePlayer = one full-window camera; SplitScreen = two stacked halves).
+fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    scene_input: Res<SceneInput>,
-    mut splat_scene: ResMut<splat_plugin::SplatScene>,
+    mode: Res<GameMode>,
 ) {
-    if let Some(ref path) = scene_input.path {
-        info!("Starting PLY background load: {}", path);
-        splat_scene.start_loading(path.clone());
-    }
-
     // Point that the camera orbits around and where we anchor the demo objects.
     let focus = Vec3::new(50.0, 35.0, 5.0);
 
@@ -140,8 +177,12 @@ fn setup(
     //
     // No MSAA: the splat rasterize uses a single-sample intermediate + the single-sample mesh
     // depth buffer; MSAA would multisample depth and mismatch the splat pass.
-    for (index, order, yaw) in [(0u8, 0isize, 0.0f32), (1u8, 1isize, std::f32::consts::FRAC_PI_2)] {
-        commands.spawn((
+    let cams: &[(u8, isize, f32)] = match *mode {
+        GameMode::SinglePlayer => &[(0, 0, 0.0)],
+        GameMode::SplitScreen => &[(0, 0, 0.0), (1, 1, FRAC_PI_2)],
+    };
+    for &(index, order, yaw) in cams {
+        let mut cam = commands.spawn((
             Camera3d::default(),
             Camera { order, ..default() },
             Tonemapping::None,
@@ -160,12 +201,15 @@ fn setup(
                 ..default()
             },
             SplatCamera,
-            SplitCamera { index },
         ));
+        // Only split-screen cameras get a viewport rect (assigned by `set_split_viewports`);
+        // the single-player camera stays full-window (viewport = None).
+        if matches!(*mode, GameMode::SplitScreen) {
+            cam.insert(SplitCamera { index });
+        }
     }
 
-    info!("=== Bevy + web-splat hybrid: SPLIT-SCREEN (2 viewports) + PBR meshes ===");
-    info!("Controls: hover a viewport, then Left-drag=orbit, Right-drag=pan, Scroll=zoom");
+    info!("[Placement] scene ready ({:?}). Orbit: hover a viewport, Left-drag=orbit, Right-drag=pan, Scroll=zoom", *mode);
 }
 
 /// Marks a camera as one half of the split screen. `index` 0 = top, 1 = bottom.
