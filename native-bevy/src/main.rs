@@ -6,20 +6,23 @@
 /// - Both share the same wgpu 27 Device
 
 mod app_state;
+mod menu_ui;
 mod persistence;
 mod splat_plugin;
 
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::camera::Viewport;
+use bevy::camera::{ClearColorConfig, Viewport};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use clap::Parser;
 use std::f32::consts::FRAC_PI_2;
+use std::path::{Path, PathBuf};
 
 use app_state::{AppState, CurrentSceneConfig, GameMode, SceneConfig, WorldUp};
+use menu_ui::{ExitAction, ModeAction, SceneAction};
 use splat_plugin::{SplatPlugin, SplatCamera};
-use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(name = "mindcloud-fly-bevy", about = "MindCloud Fly — Bevy + web-splat hybrid")]
@@ -62,30 +65,43 @@ fn main() {
     };
 
     app.add_plugins(DefaultPlugins.set(window_plugin));
+    app.add_plugins(EguiPlugin::default());
     app.add_plugins(PanOrbitCameraPlugin);
     app.add_plugins(SplatPlugin);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default());
 
-    // Black void color. With two cameras on one window target, the order-0 camera clears the
-    // shared target to this color and the order-1 camera loads it (ClearColorConfig::Default),
-    // so neither viewport erases the other.
+    // Black void color. The splat camera(s) (order 0/1) clear the shared window target; the UI
+    // Camera2d (order 10, clear=None) only overlays egui on top.
     app.insert_resource(ClearColor(Color::BLACK));
 
-    // Game mode + initial state. With `--input` we skip the (not-yet-built) menus and jump straight
-    // to Loading; without it we sit in ModeSelect until the menu slice (Phase 8) lands.
+    // Game mode + initial state. With `--input` we skip the menus and jump straight to Loading
+    // (using the CLI `--split` mode); without it we start at the ModeSelect menu.
     let mode = if args.split { GameMode::SplitScreen } else { GameMode::SinglePlayer };
     let initial = if args.input.is_some() { AppState::Loading } else { AppState::ModeSelect };
     let world_up_override = args.world_up.as_deref().map(WorldUp::parse);
     app.insert_resource(mode);
     app.insert_resource(SceneInput { path: args.input, world_up_override });
+    app.insert_resource(MenuState::default());
     app.insert_state(initial);
 
-    app.add_systems(OnEnter(AppState::ModeSelect), announce_mode_select);
+    app.add_systems(Startup, setup_ui_camera);
+    // Menu flow: egui draws in the EguiPrimaryContextPass schedule, gated by state.
+    app.add_systems(
+        EguiPrimaryContextPass,
+        (
+            mode_select_system.run_if(in_state(AppState::ModeSelect)),
+            scene_select_system.run_if(in_state(AppState::SceneSelect)),
+            loading_screen_system.run_if(in_state(AppState::Loading)),
+            exit_dialog_system,
+        ),
+    );
+    app.add_systems(OnEnter(AppState::ModeSelect), cleanup_scene);
+    app.add_systems(OnEnter(AppState::SceneSelect), scan_scenes);
     app.add_systems(OnEnter(AppState::Loading), start_loading);
     app.add_systems(Update, advance_when_loaded.run_if(in_state(AppState::Loading)));
     // init_scene_config loads/persists the per-scene config before the scene is built.
     app.add_systems(OnEnter(AppState::Placement), (init_scene_config, setup_scene).chain());
-    app.add_systems(Update, (update_window_title, set_split_viewports));
+    app.add_systems(Update, (update_window_title, set_split_viewports, handle_esc));
     app.run();
 }
 
@@ -96,9 +112,152 @@ struct SceneInput {
     world_up_override: Option<WorldUp>,
 }
 
-/// While in `ModeSelect`: hint how to start (rich menu UI is a later migration slice — Phase 8).
-fn announce_mode_select() {
-    info!("[ModeSelect] No scene loaded. Pass `--input <scene.ply>` (optionally `--split`) to start. Menu UI is a later slice.");
+/// Marks the UI/menu camera (Camera2d) that hosts egui — persists across all states.
+#[derive(Component)]
+struct UiCamera;
+
+/// Marks entities spawned for the active scene (cameras, meshes, lights) so they can be despawned
+/// when returning to the menu.
+#[derive(Component)]
+struct SceneEntity;
+
+/// Shared state for the menu systems.
+#[derive(Resource, Default)]
+struct MenuState {
+    scene_files: Vec<PathBuf>,
+    selected: Option<usize>,
+    show_exit: bool,
+}
+
+/// Startup: spawn the 2D UI camera that hosts egui. bevy_egui attaches the primary context to the
+/// FIRST camera, and menus render before any 3D camera exists, so this must exist up front. Order
+/// 10 + clear=None overlays egui on top of the splat cameras (order 0/1) without erasing them.
+fn setup_ui_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera2d,
+        Camera { order: 10, clear_color: ClearColorConfig::None, ..default() },
+        // Msaa::Off is REQUIRED: the splat Camera3d is single-sample and writes the window target
+        // directly. A multisampled UI camera would render to a 4x buffer and RESOLVE it (black,
+        // since egui draws nothing in-game) over the splat every frame. Single-sample + clear=None
+        // makes this camera LOAD the existing target and only overlay egui on top.
+        Msaa::Off,
+        UiCamera,
+    ));
+}
+
+/// `OnEnter(SceneSelect)`: scan for scene files.
+fn scan_scenes(mut menu: ResMut<MenuState>) {
+    menu.scene_files = menu_ui::scan_scene_files();
+    menu.selected = None;
+    info!("[SceneSelect] found {} scene file(s)", menu.scene_files.len());
+}
+
+/// `OnEnter(ModeSelect)`: despawn any scene entities (when returning to the menu from a game).
+fn cleanup_scene(mut commands: Commands, q: Query<Entity, With<SceneEntity>>) {
+    let n = q.iter().count();
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+    if n > 0 {
+        info!("[ModeSelect] cleaned up {} scene entit(ies)", n);
+    }
+}
+
+/// ModeSelect menu.
+fn mode_select_system(
+    mut contexts: EguiContexts,
+    mut mode: ResMut<GameMode>,
+    mut next: ResMut<NextState<AppState>>,
+) -> Result {
+    let Ok(ctx) = contexts.ctx_mut() else { return Ok(()); };
+    if let ModeAction::Select(m) = menu_ui::draw_mode_select(ctx) {
+        *mode = m;
+        info!("[ModeSelect] mode = {:?} -> SceneSelect", m);
+        next.set(AppState::SceneSelect);
+    }
+    Ok(())
+}
+
+/// SceneSelect menu.
+fn scene_select_system(
+    mut contexts: EguiContexts,
+    mut menu: ResMut<MenuState>,
+    mode: Res<GameMode>,
+    mut scene_input: ResMut<SceneInput>,
+    mut next: ResMut<NextState<AppState>>,
+) -> Result {
+    let Ok(ctx) = contexts.ctx_mut() else { return Ok(()); };
+    let mut sel = menu.selected;
+    let action = menu_ui::draw_scene_select(ctx, &menu.scene_files, *mode, &mut sel);
+    menu.selected = sel;
+    match action {
+        SceneAction::Load(path) => {
+            info!("[SceneSelect] load {} -> Loading", path.display());
+            scene_input.path = Some(path.to_string_lossy().into_owned());
+            next.set(AppState::Loading);
+        }
+        SceneAction::Back => next.set(AppState::ModeSelect),
+        SceneAction::None => {}
+    }
+    Ok(())
+}
+
+/// Loading screen.
+fn loading_screen_system(mut contexts: EguiContexts, scene_input: Res<SceneInput>) -> Result {
+    let Ok(ctx) = contexts.ctx_mut() else { return Ok(()); };
+    let name = scene_input
+        .path
+        .as_deref()
+        .and_then(|p| Path::new(p).file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "scene".to_string());
+    menu_ui::draw_loading_screen(ctx, &name);
+    Ok(())
+}
+
+/// Exit/back confirmation dialog (drawn on top whenever `show_exit` is set).
+fn exit_dialog_system(
+    mut contexts: EguiContexts,
+    mut menu: ResMut<MenuState>,
+    state: Res<State<AppState>>,
+    mut next: ResMut<NextState<AppState>>,
+    mut exit: MessageWriter<AppExit>,
+) -> Result {
+    if !menu.show_exit {
+        return Ok(());
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return Ok(()); };
+    let in_game = matches!(state.get(), AppState::Placement | AppState::Playing);
+    let mut show = true;
+    match menu_ui::draw_exit_confirm(ctx, &mut show, in_game) {
+        ExitAction::Quit => {
+            exit.write(AppExit::Success);
+        }
+        ExitAction::BackToMenu => {
+            next.set(AppState::ModeSelect);
+        }
+        ExitAction::None => {}
+    }
+    menu.show_exit = show;
+    Ok(())
+}
+
+/// ESC: menus open the quit-dialog / go back; in-game toggles the exit dialog.
+fn handle_esc(
+    keys: Res<ButtonInput<KeyCode>>,
+    state: Res<State<AppState>>,
+    mut menu: ResMut<MenuState>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    match state.get() {
+        AppState::ModeSelect => menu.show_exit = !menu.show_exit,
+        AppState::SceneSelect => next.set(AppState::ModeSelect),
+        AppState::Placement | AppState::Playing => menu.show_exit = !menu.show_exit,
+        AppState::Loading => {}
+    }
 }
 
 /// `OnEnter(Loading)`: kick off the background PLY load (the splat plugin loads on a worker thread).
@@ -167,6 +326,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::from_translation(focus),
+        SceneEntity,
     ));
     // Blue sphere offset along +X
     commands.spawn((
@@ -178,6 +338,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::from_translation(focus + Vec3::new(16.0, 0.0, 0.0)),
+        SceneEntity,
     ));
     // Green cube offset along -X
     commands.spawn((
@@ -188,6 +349,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::from_translation(focus + Vec3::new(-16.0, 0.0, 0.0)),
+        SceneEntity,
     ));
 
     // --- Lighting for the PBR meshes ---
@@ -199,6 +361,7 @@ fn setup_scene(
         },
         Transform::from_translation(focus + Vec3::new(30.0, 60.0, 40.0))
             .looking_at(focus, Vec3::Z),
+        SceneEntity,
     ));
 
     // --- Split-screen: two stacked cameras (top = player 0, bottom = player 1) ---
@@ -234,6 +397,7 @@ fn setup_scene(
                 ..default()
             },
             SplatCamera,
+            SceneEntity,
         ));
         // Only split-screen cameras get a viewport rect (assigned by `set_split_viewports`);
         // the single-player camera stays full-window (viewport = None).

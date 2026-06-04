@@ -27,6 +27,10 @@ web_splats = { path = "web-splat" }
 # Camera control
 bevy_panorbit_camera = "0.34"
 
+# egui integration for menus / HUD / settings (reuses native's mature egui UI code).
+# 0.39.x targets Bevy 0.18 (0.40.0-rc.1 targets Bevy 0.19-rc → pulls a 2nd bevy, trait mismatch).
+bevy_egui = "0.39"
+
 # Utilities
 clap = { version = "4.6", features = ["derive"] }
 pollster = "0.4"
