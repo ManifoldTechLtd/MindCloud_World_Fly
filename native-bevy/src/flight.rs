@@ -7,6 +7,7 @@ use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
 use crate::app_state::{AppState, CurrentSceneConfig, GameMode};
 use crate::drone::{Drone, FlightMode, KeyState};
+use crate::gate_plugin::RaceCourse;
 use crate::hud;
 use crate::persistence;
 use crate::placement::SpawnMarker;
@@ -213,6 +214,7 @@ fn hud_system(
     mut contexts: EguiContexts,
     players: Res<Players>,
     windows: Query<&Window>,
+    course: Option<Res<RaceCourse>>,
     diagnostics: Res<DiagnosticsStore>,
 ) -> Result {
     if players.0.is_empty() {
@@ -229,6 +231,9 @@ fn hud_system(
     if players.0.len() == 1 {
         let p = &players.0[0];
         hud::draw_hud(ctx, &p.drone, p.armed, fps, None, None);
+        if let Some(course) = &course {
+            hud::draw_race(ctx, &course.0, None, None);
+        }
     } else {
         // Window uses scale_factor_override(1.0) → egui logical points == physical px == the camera
         // viewports, so the top/bottom halves line up with the split-screen render.
@@ -242,6 +247,11 @@ fn hud_system(
             let min_y = if i == 0 { 0.0 } else { half };
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, min_y), egui::vec2(w, half));
             hud::draw_hud(ctx, &p.drone, p.armed, fps, Some(labels[i]), Some(rect));
+        }
+        // Race panel on P1 (top half) only — the single course tracks player 0.
+        if let Some(course) = &course {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, half));
+            hud::draw_race(ctx, &course.0, Some("P1"), Some(rect));
         }
     }
     Ok(())

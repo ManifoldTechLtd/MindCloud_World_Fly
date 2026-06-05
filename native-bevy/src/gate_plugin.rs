@@ -9,7 +9,8 @@ use bevy::prelude::*;
 use std::path::Path;
 
 use crate::app_state::{AppState, CurrentSceneConfig, WorldUp};
-use crate::gates::GateCourse;
+use crate::flight::Players;
+use crate::gates::{self, GateCourse, GateEvent};
 use crate::persistence;
 use crate::scene::SceneEntity;
 use crate::splat_plugin::SplatScene;
@@ -45,6 +46,10 @@ impl Plugin for GatePlugin {
         app.add_systems(
             Update,
             (toggle_gates, update_gate_appearance).run_if(in_placement_or_playing),
+        );
+        app.add_systems(
+            Update,
+            gate_race_system.run_if(in_state(AppState::Playing)),
         );
         app.add_systems(OnEnter(AppState::ModeSelect), gate_cleanup);
     }
@@ -114,6 +119,47 @@ fn ensure_gates_built(
 /// `menu::cleanup_scene` via the `SceneEntity` root) so the next scene builds fresh.
 fn gate_cleanup(mut commands: Commands) {
     commands.remove_resource::<RaceCourse>();
+}
+
+/// `Update` (Playing): drive pass detection + lap timing from player 0's (P1) drone position.
+/// The course only reacts while visible (press G). R resets the current lap (matches native).
+/// Single-course: in split-screen the timer tracks P1 only (native races P1 via the controller).
+fn gate_race_system(
+    course: Option<ResMut<RaceCourse>>,
+    players: Option<Res<Players>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+) {
+    let Some(mut course) = course else {
+        return;
+    };
+    let Some(players) = players else {
+        return;
+    };
+    if players.0.is_empty() {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        course.0.reset_lap();
+    }
+    let d = &players.0[0].drone;
+    let pos = cgmath::Vector3::new(d.x, d.y, d.z);
+    let now_ms = time.elapsed_secs_f64() * 1000.0;
+    let dt = time.delta_secs();
+    for ev in course.0.update(dt, pos, now_ms) {
+        match ev {
+            GateEvent::Passed { index, total } => {
+                info!("[Race] passed gate {} / {}", index + 1, total);
+            }
+            GateEvent::LapComplete { lap_ms, is_best } => {
+                info!(
+                    "[Race] lap {}{}",
+                    gates::format_lap(lap_ms),
+                    if is_best { " — NEW BEST" } else { "" }
+                );
+            }
+        }
+    }
 }
 
 /// `Update` (Placement/Playing): `G` toggles the whole course visibility.

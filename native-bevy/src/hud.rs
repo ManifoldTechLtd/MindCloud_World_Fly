@@ -7,11 +7,65 @@ use bevy_egui::egui::{self, Color32, FontId, Pos2, Rect, RichText, Stroke, Vec2}
 
 use crate::app_state::WorldUp;
 use crate::drone::{Drone, FlightMode};
+use crate::gates::{self, GateCourse};
 
 const GREEN: Color32 = Color32::from_rgb(0, 255, 100);
 const DIM: Color32 = Color32::from_rgb(100, 160, 100);
 const WARN: Color32 = Color32::from_rgb(255, 80, 80);
 const BG: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 120);
+
+/// Draw the race panel (gate count · current lap · best lap) at the viewport's top-left, below the
+/// info panel. No-op unless the course is visible and has gates. Ported from native `src/hud.rs`.
+pub fn draw_race(
+    ctx: &egui::Context,
+    course: &GateCourse,
+    player_label: Option<&str>,
+    viewport: Option<Rect>,
+) {
+    if !course.visible || course.gates.is_empty() {
+        return;
+    }
+    let vp = viewport.unwrap_or_else(|| ctx.content_rect());
+    let area_id = player_label.unwrap_or("sp");
+    egui::Area::new(egui::Id::new(format!("race_{}", area_id)))
+        .fixed_pos(vp.min + Vec2::new(8.0, 80.0))
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(BG)
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("FPV RACE").color(DIM).size(12.0).strong().italics());
+                    let passed = course.passed_count();
+                    let total = course.gates.len();
+                    let next = if passed < total { passed + 1 } else { total };
+                    ui.label(
+                        RichText::new(format!("GATE {:>2} / {}", next, total))
+                            .color(Color32::WHITE)
+                            .size(12.0),
+                    );
+                    let lap_str = gates::format_lap(course.current_lap_ms);
+                    let lap_c = if course.lap_start.is_some() {
+                        Color32::from_rgb(77, 220, 255)
+                    } else {
+                        DIM
+                    };
+                    ui.label(RichText::new(&lap_str).color(lap_c).size(16.0).strong());
+                    let best = course
+                        .best_lap_ms
+                        .map(gates::format_lap)
+                        .unwrap_or_else(|| "--:--.---".into());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("BEST").color(DIM).size(10.0));
+                        ui.label(
+                            RichText::new(&best)
+                                .color(Color32::from_rgb(192, 132, 252))
+                                .size(11.0),
+                        );
+                    });
+                });
+        });
+}
 
 /// Draw the complete HUD for one player inside the given viewport rectangle (full screen if `None`).
 pub fn draw_hud(
