@@ -58,3 +58,64 @@ pub fn save_scene_config(scene_key: &str, config: &SceneConfig) -> std::io::Resu
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(path, json)
 }
+
+/// Drone physics settings (persisted to `drone.json`). Ported from `native/src/persistence.rs`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct DroneSettings {
+    pub mass: f32,
+    pub max_thrust: f32,
+    pub drag_cd: f32,
+    pub drag_area: f32,
+    pub collision_radius: f32,
+    pub drone_size: f32,
+    pub camera_mount_angle: f32,
+    pub max_pitch_rate: f32,
+    pub max_roll_rate: f32,
+    pub max_yaw_rate: f32,
+    // Drone mode PID
+    pub drone_pos_kp: f32,
+    pub drone_pos_ki: f32,
+    pub drone_pos_kd: f32,
+    pub drone_vel_kp: f32,
+    pub drone_vel_ki: f32,
+    pub drone_vel_kd: f32,
+    pub drone_alt_kp: f32,
+    pub drone_alt_ki: f32,
+    pub drone_alt_kd: f32,
+}
+
+/// Save the drone's tunable physics params to `drone.json`. Ported from native.
+pub fn save_drone_settings(drone: &crate::drone::Drone) -> std::io::Result<()> {
+    ensure_config_dir();
+    let s = DroneSettings {
+        mass: drone.mass, max_thrust: drone.max_thrust,
+        drag_cd: drone.drag_cd, drag_area: drone.drag_area,
+        collision_radius: drone.collision_radius, drone_size: drone.drone_size,
+        camera_mount_angle: drone.camera_mount_angle,
+        max_pitch_rate: drone.max_pitch_rate, max_roll_rate: drone.max_roll_rate,
+        max_yaw_rate: drone.max_yaw_rate,
+        drone_pos_kp: drone.drone_pos_kp, drone_pos_ki: drone.drone_pos_ki, drone_pos_kd: drone.drone_pos_kd,
+        drone_vel_kp: drone.drone_vel_kp, drone_vel_ki: drone.drone_vel_ki, drone_vel_kd: drone.drone_vel_kd,
+        drone_alt_kp: drone.drone_alt_kp, drone_alt_ki: drone.drone_alt_ki, drone_alt_kd: drone.drone_alt_kd,
+    };
+    let json = serde_json::to_string_pretty(&s)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(config_dir().join("drone.json"), json)
+}
+
+/// Load drone physics params from `drone.json` into `drone` (no-op if absent). Ported from native.
+pub fn load_drone_settings(drone: &mut crate::drone::Drone) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join("drone.json")) {
+        if let Ok(s) = serde_json::from_str::<DroneSettings>(&json) {
+            drone.mass = s.mass; drone.max_thrust = s.max_thrust;
+            drone.drag_cd = s.drag_cd; drone.drag_area = s.drag_area;
+            drone.collision_radius = s.collision_radius; drone.drone_size = s.drone_size;
+            drone.camera_mount_angle = s.camera_mount_angle;
+            drone.max_pitch_rate = s.max_pitch_rate; drone.max_roll_rate = s.max_roll_rate;
+            drone.max_yaw_rate = s.max_yaw_rate;
+            drone.drone_pos_kp = s.drone_pos_kp; drone.drone_pos_ki = s.drone_pos_ki; drone.drone_pos_kd = s.drone_pos_kd;
+            drone.drone_vel_kp = s.drone_vel_kp; drone.drone_vel_ki = s.drone_vel_ki; drone.drone_vel_kd = s.drone_vel_kd;
+            drone.drone_alt_kp = s.drone_alt_kp; drone.drone_alt_ki = s.drone_alt_ki; drone.drone_alt_kd = s.drone_alt_kd;
+        }
+    }
+}
