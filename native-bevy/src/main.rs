@@ -15,6 +15,7 @@ mod persistence;
 mod placement;
 mod placement_ui;
 mod scene;
+mod settings_ui;
 mod splat_plugin;
 
 use bevy::prelude::*;

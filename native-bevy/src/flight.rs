@@ -10,6 +10,7 @@ use crate::drone::{Drone, FlightMode, KeyState};
 use crate::hud;
 use crate::persistence;
 use crate::placement::SpawnMarker;
+use crate::settings_ui;
 use crate::splat_plugin::SplatCamera;
 
 /// The single-player drone + its keyboard state + armed flag (inserted on entering `Playing`).
@@ -20,23 +21,28 @@ pub struct PlayerDrone {
     pub armed: bool,
 }
 
+/// Whether the in-flight settings panel (toggled with F1) is open.
+#[derive(Resource, Default)]
+pub struct SettingsOpen(pub bool);
+
 /// Wires the flight systems: drone setup on entering `Playing`, then input → physics → camera each
 /// frame while playing.
 pub struct FlightPlugin;
 
 impl Plugin for FlightPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<SettingsOpen>();
         app.add_systems(OnEnter(AppState::Playing), setup_flight);
         app.add_systems(
             Update,
-            (drone_input_system, drone_camera_system)
+            (settings_toggle_system, drone_input_system, drone_camera_system)
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         );
-        // HUD overlay draws in the egui pass while flying.
+        // HUD + settings panel draw in the egui pass while flying.
         app.add_systems(
             EguiPrimaryContextPass,
-            hud_system.run_if(in_state(AppState::Playing)),
+            (hud_system, settings_ui_system).run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -62,6 +68,7 @@ fn setup_flight(
         s, config.0.heading_deg, drone.flight_mode
     );
     commands.insert_resource(PlayerDrone { drone, keys: KeyState::default(), armed: false });
+    commands.insert_resource(SettingsOpen(false));
     // The placement spawn marker is not shown during flight.
     for e in &markers {
         commands.entity(e).despawn();
@@ -136,5 +143,30 @@ fn hud_system(
         .and_then(|d| d.smoothed())
         .unwrap_or(0.0) as f32;
     hud::draw_hud(ctx, &pd.drone, pd.armed, fps, None, None);
+    Ok(())
+}
+
+/// `Update` (Playing): F1 toggles the settings panel (native uses F1). Esc still toggles the exit
+/// dialog (`menu::handle_esc`); close the panel with F1 or its `[x]`.
+fn settings_toggle_system(keys: Res<ButtonInput<KeyCode>>, mut settings_open: ResMut<SettingsOpen>) {
+    if keys.just_pressed(KeyCode::F1) {
+        settings_open.0 = !settings_open.0;
+    }
+}
+
+/// `EguiPrimaryContextPass` (Playing): draw the settings panel (drone physics/rates/PID) when open.
+/// Param edits persist per-section inside `settings_ui::draw_settings`.
+fn settings_ui_system(
+    mut contexts: EguiContexts,
+    mut settings_open: ResMut<SettingsOpen>,
+    mut pd: ResMut<PlayerDrone>,
+) -> Result {
+    if !settings_open.0 {
+        return Ok(());
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    settings_ui::draw_settings(ctx, &mut settings_open.0, &mut pd.drone);
     Ok(())
 }
