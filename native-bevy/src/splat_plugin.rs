@@ -42,11 +42,14 @@ pub struct SplatScene {
     /// PLY coords == Bevy world coords for positions, so this is directly usable as a Bevy-space
     /// orbit focus / default spawn point. `None` until loading completes.
     pub scene_center: Option<[f32; 3]>,
+    /// Downsampled world point positions kept CPU-side for the gate editor's top-down backdrop
+    /// (the full raw cloud is consumed by the GPU upload). Empty until loading completes.
+    pub cloud_points: Vec<[f32; 3]>,
 }
 
 impl Default for SplatScene {
     fn default() -> Self {
-        Self { ply_path: None, loader: None, pc_raw: None, loaded: false, scene_center: None }
+        Self { ply_path: None, loader: None, pc_raw: None, loaded: false, scene_center: None, cloud_points: Vec::new() }
     }
 }
 
@@ -54,6 +57,12 @@ impl SplatScene {
     /// Start loading PLY in background
     pub fn start_loading(&mut self, path: String) {
         self.ply_path = Some(path.clone());
+        // Reset per-scene state so a SECOND load in the same process is actually processed (without
+        // this, `poll_loading`'s `if self.loaded { return }` early-out kept the first scene's data).
+        self.loaded = false;
+        self.pc_raw = None;
+        self.scene_center = None;
+        self.cloud_points.clear();
         let handle = std::thread::spawn(move || {
             let file = std::fs::File::open(&path).expect("Failed to open PLY");
             let reader = std::io::BufReader::new(file);
@@ -72,9 +81,11 @@ impl SplatScene {
                 self.loaded = true;
                 if let Some(pc) = &self.pc_raw {
                     self.scene_center = Some([pc.center.x, pc.center.y, pc.center.z]);
+                    self.cloud_points = pc.extract_positions_downsampled(0.1, 400000);
                     info!(
-                        "PLY loaded: {} points, center {:?}, bbox radius {:.1}",
+                        "PLY loaded: {} points ({} backdrop), center {:?}, bbox radius {:.1}",
                         pc.num_points,
+                        self.cloud_points.len(),
                         self.scene_center.unwrap(),
                         pc.aabb.radius()
                     );
@@ -153,7 +164,15 @@ impl Plugin for SplatPlugin {
             .add_systems(
                 bevy::render::Render,
                 (
-                    init_splat_gpu_state.run_if(not(resource_exists::<SplatGpuState>)),
+                    // On a SCENE SWITCH the main world parses the new PLY and pushes it into
+                    // `SplatInitData::raw`; drop the stale `SplatGpuState` so `init_splat_gpu_state`
+                    // rebuilds the GPU cloud + per-view renderers from it (they depend on sh_deg /
+                    // compression, which differ between scenes). Runs before init so the rebuild
+                    // happens the same frame.
+                    reset_splat_on_new_scene,
+                    init_splat_gpu_state
+                        .after(reset_splat_on_new_scene)
+                        .run_if(not(resource_exists::<SplatGpuState>)),
                     // Create per-view renderers AFTER init, once SplatGpuState exists. Runs as a
                     // system (not in the render graph) because GPURSSorter creation submits +
                     // polls the device, which would deadlock inside a render-graph node.
@@ -173,6 +192,23 @@ impl Plugin for SplatPlugin {
                 // the background wherever no mesh is present.
                 (Node3d::MainTransparentPass, SplatPassLabel, Node3d::EndMainPass),
             );
+    }
+}
+
+/// Render-world system: when the main world finishes loading a NEW scene it pushes the parsed cloud
+/// into `SplatInitData::raw`. If a `SplatGpuState` from a PREVIOUS scene still exists, drop it so
+/// `init_splat_gpu_state` (which only runs when no `SplatGpuState` exists) rebuilds the GPU cloud +
+/// per-view renderers from the new data. Without this the second scene loaded in one process keeps
+/// showing the first scene's splat. The raw is NOT consumed here — `init_splat_gpu_state` takes it
+/// once the resource is gone (auto-inserted sync point between the two systems applies the removal).
+fn reset_splat_on_new_scene(
+    mut commands: Commands,
+    init_data: Res<SplatInitData>,
+    gpu_state: Option<Res<SplatGpuState>>,
+) {
+    if gpu_state.is_some() && init_data.raw.lock().unwrap().is_some() {
+        commands.remove_resource::<SplatGpuState>();
+        info!("[Splat] new scene loaded -> rebuilding GPU state");
     }
 }
 

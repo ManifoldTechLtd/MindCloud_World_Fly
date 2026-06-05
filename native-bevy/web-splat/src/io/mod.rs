@@ -205,6 +205,37 @@ impl GenericGaussianPointCloud {
             pos
         }
     }
+
+    /// Extract a strided, downsampled set of point positions as world XYZ triples for a lightweight
+    /// preview (e.g. the gate editor's top-down backdrop). Steps through the gaussians so the result
+    /// is roughly `max_points` long, skipping near-transparent points (opacity < `min_opacity`).
+    /// Avoids the full per-point allocation of [`extract_positions_filtered`].
+    pub fn extract_positions_downsampled(&self, min_opacity: f32, max_points: usize) -> Vec<[f32; 3]> {
+        let stride = (self.num_points / max_points.max(1)).max(1);
+        let mut out = Vec::with_capacity(self.num_points / stride + 1);
+        if self.compressed {
+            let gaussians: &[GaussianCompressed] = bytemuck::cast_slice(&self.gaussians);
+            let mut i = 0;
+            while i < gaussians.len() {
+                let g = &gaussians[i];
+                if (g.opacity as f32 + 128.0) / 255.0 >= min_opacity {
+                    out.push([g.xyz.x, g.xyz.y, g.xyz.z]);
+                }
+                i += stride;
+            }
+        } else {
+            let gaussians: &[Gaussian] = bytemuck::cast_slice(&self.gaussians);
+            let mut i = 0;
+            while i < gaussians.len() {
+                let g = &gaussians[i];
+                if g.opacity.to_f32() >= min_opacity {
+                    out.push([g.xyz.x, g.xyz.y, g.xyz.z]);
+                }
+                i += stride;
+            }
+        }
+        out
+    }
 }
 
 // Fit a plane to a collection of points.
