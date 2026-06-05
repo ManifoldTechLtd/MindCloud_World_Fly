@@ -100,7 +100,21 @@ fn ensure_gates_built(
             .map(|p| cgmath::Vector3::new(p[0], p[1], p[2]))
             .collect()
     } else {
-        demo_ring(config.0.spawn, world_up, 12.0)
+        // Demo course sits AHEAD of the spawn along the heading (not centered on it): a ring
+        // centered on the spawn surrounds the drone, so climbing straight up its axis makes it
+        // shrink-in-place and look "attached" to the plane. Offsetting it forward makes the gates
+        // read as clearly world-fixed (you fly toward them).
+        // fwd = drone spawn forward = orbit look_dir = the spawn arrow's direction, so the ring sits
+        // AHEAD of the spawn in the fly-forward direction (Zup: (sin h, cos h, 0); Colmap unchanged).
+        let h = config.0.heading_deg.to_radians();
+        let fwd = match config.0.world_up {
+            WorldUp::Zup => [h.sin(), h.cos(), 0.0],
+            WorldUp::Colmap => [h.cos(), 0.0, h.sin()],
+        };
+        let r = 12.0_f32;
+        let s = config.0.spawn;
+        let center = [s[0] + fwd[0] * r * 1.5, s[1] + fwd[1] * r * 1.5, s[2] + fwd[2] * r * 1.5];
+        demo_ring(center, world_up, r)
     };
     course.rebuild(&points, world_up);
     course.visible = true;

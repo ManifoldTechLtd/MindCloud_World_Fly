@@ -385,16 +385,20 @@ impl ViewNode for SplatNode {
         state.args.viewport = cgmath::Vector2::new(vp_w as u32, vp_h as u32);
 
         // Sync camera position + rotation from Bevy's ExtractedView.
-        // Bevy uses OpenGL convention (camera looks -Z, +Y up).
-        // web-splat uses COLMAP convention (camera looks +Z, +Y down).
-        // Conversion: rotate camera basis 180° about X (flips Y and Z).
+        // Bevy uses OpenGL convention (camera looks -Z, +Y up); its `world_from_view` rotation is
+        // camera→world. web-splat uses COLMAP convention (camera looks +Z, +Y down) and its
+        // `world2view` treats `camera.rotation` as a WORLD→VIEW rotation. So the conversion is:
+        //   1. flip the camera basis 180° about X (Bevy↔COLMAP: flips Y and Z), then
+        //   2. CONJUGATE (camera→world ⇒ world→view).
+        // `bevy_q * flip_x` alone only matches at identity and drifts under rotation (meshes slide
+        // off the splat). Verified to 0.0 NDC error by tests/splat_camera_align.rs.
         {
             let (_, bevy_rot, bevy_pos) = extracted_view.world_from_view.to_scale_rotation_translation();
             // 180° about X: cgmath Quaternion::new(w=0, x=1, y=0, z=0)
             let flip_x = cgmath::Quaternion::new(0.0, 1.0, 0.0, 0.0);
             let bevy_q = cgmath::Quaternion::new(bevy_rot.w, bevy_rot.x, bevy_rot.y, bevy_rot.z);
             state.args.camera.position = cgmath::Point3::new(bevy_pos.x, bevy_pos.y, bevy_pos.z);
-            state.args.camera.rotation = bevy_q * flip_x;
+            state.args.camera.rotation = (bevy_q * flip_x).conjugate();
         }
         // Derive fov + near DIRECTLY from Bevy's projection matrix so the splat frustum matches the
         // meshes for ANY viewport aspect (split-screen halves are very wide). web-splat's own

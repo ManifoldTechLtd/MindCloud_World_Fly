@@ -45,7 +45,7 @@ struct OrbitState {
 
 impl Default for OrbitState {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: -20.0, dist: 45.0 }
+        Self { yaw: 0.0, pitch: -20.0, dist: 18.0 }
     }
 }
 
@@ -131,46 +131,10 @@ fn setup_scene(
     // Orbit focus + demo-object anchor = the configured spawn point (scene center on first use).
     let focus = Vec3::from(config.0.spawn);
 
-    // --- PBR 3D objects placed inside the gaussian splat scene ---
-    let cube_mesh = meshes.add(Cuboid::new(8.0, 8.0, 8.0));
-    let sphere_mesh = meshes.add(Sphere::new(5.0));
+    // (Demo PBR cubes/sphere removed: the gate frames are now the in-scene mesh reference, and the
+    // old blue demo sphere clashed with the blue spawn marker below.)
 
-    // Red cube offset along +Y (kept off the spawn point so the drone doesn't start inside it)
-    commands.spawn((
-        Mesh3d(cube_mesh.clone()),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.9, 0.15, 0.15),
-            perceptual_roughness: 0.5,
-            ..default()
-        })),
-        Transform::from_translation(focus + Vec3::new(0.0, 16.0, 0.0)),
-        SceneEntity,
-    ));
-    // Blue sphere offset along +X
-    commands.spawn((
-        Mesh3d(sphere_mesh),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.15, 0.45, 0.95),
-            metallic: 0.3,
-            perceptual_roughness: 0.3,
-            ..default()
-        })),
-        Transform::from_translation(focus + Vec3::new(16.0, 0.0, 0.0)),
-        SceneEntity,
-    ));
-    // Green cube offset along -X
-    commands.spawn((
-        Mesh3d(cube_mesh),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.85, 0.3),
-            perceptual_roughness: 0.6,
-            ..default()
-        })),
-        Transform::from_translation(focus + Vec3::new(-16.0, 0.0, 0.0)),
-        SceneEntity,
-    ));
-
-    // --- Lighting for the PBR meshes ---
+    // --- Lighting (kept for any future lit PBR meshes; the marker + gates are unlit). ---
     commands.spawn((
         DirectionalLight {
             illuminance: 12000.0,
@@ -181,12 +145,13 @@ fn setup_scene(
         SceneEntity,
     ));
 
-    // --- Spawn marker: bright unlit sphere + forward arrow at the configured spawn point. ---
-    // `placement_update` moves/rotates this each frame to follow `spawn` + `heading`, so editing
-    // the spawn (text fields or WASD) is visible; the orbit camera also recenters on `spawn`.
+    // --- Spawn marker: a bright blue ball + heading arrow at the configured spawn point. ---
+    // `placement_update` moves/rotates this each frame to follow `spawn` + `heading`; the arrow is
+    // modeled along +Y and the parent rotation aims it along the heading (= the orbit view
+    // direction), so the marker shows where the drone starts and which way it faces.
     let marker_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.85, 0.1),
-        emissive: LinearRgba::rgb(1.5, 1.2, 0.0),
+        base_color: Color::srgb(0.1, 0.5, 1.0),
+        emissive: LinearRgba::rgb(0.1, 0.9, 3.0),
         unlit: true,
         ..default()
     });
@@ -198,16 +163,22 @@ fn setup_scene(
             SceneEntity,
         ))
         .with_children(|p| {
+            // Ball at the spawn point.
             p.spawn((
-                Mesh3d(meshes.add(Sphere::new(1.5))),
+                Mesh3d(meshes.add(Sphere::new(1.0))),
                 MeshMaterial3d(marker_mat.clone()),
                 Transform::default(),
             ));
-            // Arrow modeled along +Y; the parent rotation aims it along the heading direction.
+            // Arrow shaft + cone head along +Y (aimed by the parent rotation).
             p.spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.4, 6.0, 0.4))),
+                Mesh3d(meshes.add(Cuboid::new(0.45, 5.0, 0.45))),
+                MeshMaterial3d(marker_mat.clone()),
+                Transform::from_xyz(0.0, 2.5, 0.0),
+            ));
+            p.spawn((
+                Mesh3d(meshes.add(Cone { radius: 1.1, height: 2.2 })),
                 MeshMaterial3d(marker_mat),
-                Transform::from_xyz(0.0, 3.5, 0.0),
+                Transform::from_xyz(0.0, 6.1, 0.0),
             ));
         });
 
@@ -318,11 +289,14 @@ fn placement_update(
     if !ui_focus.wants_keyboard && !menu.show_exit {
         update_spawn(&mut config.0, &orbit, time.delta_secs(), &keys);
     }
-    // Keep the marker (position + heading) on the spawn point.
+    // Keep the marker (position + heading) on the spawn point. `fwd_dir` MUST equal the orbit
+    // camera's horizontal look direction (= the drone spawn forward) so the arrow rotates WITH the
+    // camera/heading. Zup: compute_orbit_camera's look_dir is (sin h, cos h, 0) (CW from above);
+    // the earlier (-sin h, ...) spun the arrow CCW — opposite the camera. Colmap already matches.
     let spawn = Vec3::from(config.0.spawn);
     let h = config.0.heading_deg.to_radians();
     let fwd_dir = match config.0.world_up {
-        WorldUp::Zup => Vec3::new(-h.sin(), h.cos(), 0.0),
+        WorldUp::Zup => Vec3::new(h.sin(), h.cos(), 0.0),
         WorldUp::Colmap => Vec3::new(h.cos(), 0.0, h.sin()),
     };
     let rot = Quat::from_rotation_arc(Vec3::Y, fwd_dir);
@@ -388,12 +362,14 @@ fn compute_orbit_camera(
     (cam_pos, cgmath::Quaternion::look_at(look_dir, up))
 }
 
-/// Bevy transform for the placement orbit: `compute_orbit_camera` (web-splat convention) converted
-/// via the same `* flip_x` (180° about X) the splat node applies, matching `flight::drone_camera_system`.
+/// Bevy transform for the placement orbit. `compute_orbit_camera` yields q_wb (web-splat convention);
+/// the Bevy camera that renders the SAME view is `q_wb.conjugate() * flip_x` (180° about X), matching
+/// `flight::drone_camera_system`. The splat node re-derives `(bevy_q*flip_x).conjugate()` = q_wb, so
+/// gates/markers stay locked to the splat. Verified in tests/splat_camera_align.rs.
 fn orbit_camera_transform(config: &SceneConfig, orbit: &OrbitState) -> Transform {
     let (pos, rot) = compute_orbit_camera(config, orbit);
     let flip_x = cgmath::Quaternion::new(0.0, 1.0, 0.0, 0.0);
-    let q = rot * flip_x;
+    let q = rot.conjugate() * flip_x;
     Transform {
         translation: Vec3::new(pos.x, pos.y, pos.z),
         rotation: Quat::from_xyzw(q.v.x, q.v.y, q.v.z, q.s),

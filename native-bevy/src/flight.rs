@@ -184,9 +184,10 @@ fn toggle_mode(m: FlightMode) -> FlightMode {
 
 /// `Update` (Playing): drive each SplatCamera from its player's drone camera transform. The camera
 /// for `SplitCamera{index}` follows player `index`; the single-player camera (no `SplitCamera`)
-/// follows player 0. The drone yields (pos, q_wb) in web-splat convention; the splat node re-applies
-/// the Bevy→COLMAP rotation (180° about X), so the Bevy camera rotation is `cam_orient * flip_x`
-/// (flip_x is its own inverse).
+/// follows player 0. The drone yields (pos, q_wb) in web-splat convention. The Bevy camera that
+/// renders the SAME view as web-splat(q_wb) is `q_wb.conjugate() * flip_x` (180° about X); the splat
+/// node re-derives `(bevy_q*flip_x).conjugate()` = q_wb, so meshes (gates/markers) stay locked to the
+/// splat under all rotations. Verified in tests/splat_camera_align.rs.
 fn drone_camera_system(
     players: Res<Players>,
     mut cams: Query<(&mut Transform, Option<&SplitCamera>), With<SplatCamera>>,
@@ -201,7 +202,7 @@ fn drone_camera_system(
             .unwrap_or(0)
             .min(players.0.len() - 1);
         let (pos, cam_orient) = players.0[idx].drone.camera_transform();
-        let q = cam_orient * flip_x;
+        let q = cam_orient.conjugate() * flip_x;
         t.translation = Vec3::new(pos.x, pos.y, pos.z);
         t.rotation = Quat::from_xyzw(q.v.x, q.v.y, q.v.z, q.s);
     }
