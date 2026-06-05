@@ -8,6 +8,8 @@
 mod app_state;
 mod drone;
 mod flight;
+mod gate_plugin;
+mod gates;
 mod hud;
 mod menu;
 mod menu_ui;
@@ -16,6 +18,7 @@ mod placement;
 mod placement_ui;
 mod scene;
 mod settings_ui;
+mod spline;
 mod splat_plugin;
 
 use bevy::prelude::*;
@@ -25,6 +28,7 @@ use clap::Parser;
 
 use app_state::{AppState, GameMode, WorldUp};
 use flight::FlightPlugin;
+use gate_plugin::GatePlugin;
 use menu::MenuPlugin;
 use placement::PlacementPlugin;
 use scene::ScenePlugin;
@@ -96,7 +100,7 @@ fn main() {
     //  - ScenePlugin:     shared split-screen viewport layout + window title/FPS.
     //  - PlacementPlugin: scene build, world-up-aware orbit camera, spawn/heading editing overlay.
     //  - FlightPlugin:    the player drone (keyboard → physics → camera).
-    app.add_plugins((MenuPlugin, ScenePlugin, PlacementPlugin, FlightPlugin));
+    app.add_plugins((MenuPlugin, ScenePlugin, PlacementPlugin, FlightPlugin, GatePlugin));
 
     app.run();
 }

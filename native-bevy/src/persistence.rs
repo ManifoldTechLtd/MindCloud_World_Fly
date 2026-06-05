@@ -59,6 +59,36 @@ pub fn save_scene_config(scene_key: &str, config: &SceneConfig) -> std::io::Resu
     std::fs::write(path, json)
 }
 
+/// Per-scene gate-path record (stored as JSON). Ported from `native/src/persistence.rs`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct SceneRecord {
+    pub points: Vec<[f32; 3]>,
+    pub gate_size: f32,
+    pub best_lap_ms: Option<f64>,
+}
+
+/// Gate-path directory: `~/.config/mindcloud-fly/gate-paths`. (native used a CWD-relative
+/// `asset/gate-paths`; native-bevy is standalone + CWD-independent, so it lives under the config dir.)
+fn gate_paths_dir() -> PathBuf {
+    config_dir().join("gate-paths")
+}
+
+/// Save a scene's gate-path record to `gate-paths/{scene_key}.json`.
+pub fn save_scene_record(scene_key: &str, record: &SceneRecord) -> std::io::Result<()> {
+    let dir = gate_paths_dir();
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(record)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(dir.join(format!("{}.json", scene_key)), json)
+}
+
+/// Load a scene's gate-path record (returns `None` if absent / unparseable).
+pub fn load_scene_record(scene_key: &str) -> Option<SceneRecord> {
+    let path = gate_paths_dir().join(format!("{}.json", scene_key));
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
 /// Drone physics settings (persisted to `drone.json`). Ported from `native/src/persistence.rs`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DroneSettings {
