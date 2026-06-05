@@ -34,7 +34,7 @@ pub struct SplatCamera;
 #[derive(Resource)]
 pub struct SplatScene {
     pub ply_path: Option<String>,
-    loader: Option<JoinHandle<GenericGaussianPointCloud>>,
+    loader: Option<JoinHandle<(GenericGaussianPointCloud, crate::collision::Octree)>>,
     pc_raw: Option<GenericGaussianPointCloud>,
     pub loaded: bool,
     /// Robust scene center (plane-fit centroid) of the loaded cloud, in PLY coords. Because the
@@ -45,11 +45,15 @@ pub struct SplatScene {
     /// Downsampled world point positions kept CPU-side for the gate editor's top-down backdrop
     /// (the full raw cloud is consumed by the GPU upload). Empty until loading completes.
     pub cloud_points: Vec<[f32; 3]>,
+    /// Collision octree (point-cloud spatial index) built off the main thread during loading and
+    /// kept CPU-side so flight can query it for drone collision. It survives the `take_raw` GPU
+    /// handoff that consumes `pc_raw`. `None` until loading completes.
+    pub collision_octree: Option<crate::collision::Octree>,
 }
 
 impl Default for SplatScene {
     fn default() -> Self {
-        Self { ply_path: None, loader: None, pc_raw: None, loaded: false, scene_center: None, cloud_points: Vec::new() }
+        Self { ply_path: None, loader: None, pc_raw: None, loaded: false, scene_center: None, cloud_points: Vec::new(), collision_octree: None }
     }
 }
 
@@ -63,10 +67,19 @@ impl SplatScene {
         self.pc_raw = None;
         self.scene_center = None;
         self.cloud_points.clear();
+        self.collision_octree = None;
         let handle = std::thread::spawn(move || {
             let file = std::fs::File::open(&path).expect("Failed to open PLY");
             let reader = std::io::BufReader::new(file);
-            GenericGaussianPointCloud::load(reader).expect("Failed to parse PLY")
+            let pc = GenericGaussianPointCloud::load(reader).expect("Failed to parse PLY");
+            // Build the collision octree on this background thread (opacity 0.02 filtered positions,
+            // matching native) so the heavy extraction + subdivision never stalls the main thread.
+            let aabb = &pc.aabb;
+            let bmin = [aabb.min.x, aabb.min.y, aabb.min.z];
+            let bmax = [aabb.max.x, aabb.max.y, aabb.max.z];
+            let mut octree = crate::collision::Octree::new();
+            octree.build(pc.extract_positions_filtered(0.02), bmin, bmax);
+            (pc, octree)
         });
         self.loader = Some(handle);
     }
@@ -77,7 +90,9 @@ impl SplatScene {
         if let Some(ref handle) = self.loader {
             if handle.is_finished() {
                 let h = self.loader.take().unwrap();
-                self.pc_raw = Some(h.join().unwrap());
+                let (pc, octree) = h.join().unwrap();
+                self.pc_raw = Some(pc);
+                self.collision_octree = Some(octree);
                 self.loaded = true;
                 if let Some(pc) = &self.pc_raw {
                     self.scene_center = Some([pc.center.x, pc.center.y, pc.center.z]);

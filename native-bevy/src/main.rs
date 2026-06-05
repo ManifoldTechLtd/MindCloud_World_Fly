@@ -6,6 +6,7 @@
 /// - Both share the same wgpu 27 Device
 
 mod app_state;
+mod collision;
 mod drone;
 mod flight;
 mod gate_editor;

@@ -14,7 +14,7 @@ use crate::persistence;
 use crate::placement::SpawnMarker;
 use crate::scene::SplitCamera;
 use crate::settings_ui;
-use crate::splat_plugin::SplatCamera;
+use crate::splat_plugin::{SplatCamera, SplatScene};
 
 /// One player's drone + its keyboard state + armed flag.
 pub struct PlayerState {
@@ -114,6 +114,7 @@ fn drone_input_system(
     mut ctrl: Option<ResMut<ControllerRes>>,
     settings_open: Res<SettingsOpen>,
     menu: Res<crate::menu::MenuState>,
+    splat: Res<SplatScene>,
 ) {
     if players.0.is_empty() {
         return;
@@ -172,6 +173,9 @@ fn drone_input_system(
             p.keys.to_input(p.armed)
         };
         p.drone.update(dt, &input);
+        if let Some(octree) = &splat.collision_octree {
+            check_collision(&mut p.drone, octree);
+        }
     }
 
     // --- Player 2 (split-screen only) ---
@@ -203,6 +207,21 @@ fn drone_input_system(
         let armed = p.armed;
         let input = p.keys.to_input(armed);
         p.drone.update(dt, &input);
+        if let Some(octree) = &splat.collision_octree {
+            check_collision(&mut p.drone, octree);
+        }
+    }
+}
+
+/// Point-cloud collision for one drone after its physics step (mirrors native's check_collision):
+/// query the octree at the drone position, then push out + bounce-reflect, or clear if no contact.
+fn check_collision(drone: &mut Drone, octree: &crate::collision::Octree) {
+    let hits = octree.query_sphere(drone.x, drone.y, drone.z, drone.collision_radius);
+    match crate::collision::compute_collision_response(
+        drone.x, drone.y, drone.z, drone.collision_radius, &hits,
+    ) {
+        Some(r) => drone.apply_collision(r.normal, r.penetration),
+        None => drone.clear_collision(),
     }
 }
 
