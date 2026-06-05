@@ -47,7 +47,13 @@ impl Plugin for GatePlugin {
         app.init_resource::<GateVisualsDirty>();
         app.add_systems(
             Update,
-            (ensure_gates_built, respawn_gate_visuals).run_if(in_state(AppState::Placement)),
+            (
+                rebuild_gates_on_world_up_change,
+                ensure_gates_built,
+                respawn_gate_visuals,
+            )
+                .chain()
+                .run_if(in_state(AppState::Placement)),
         );
         app.add_systems(
             Update,
@@ -133,6 +139,30 @@ fn ensure_gates_built(
         n,
         if record.is_some() { "saved path" } else { "demo ring" }
     );
+}
+
+/// `Update` (Placement, before `ensure_gates_built`): if the user flips World Up in the overlay,
+/// the course (built for the old up-axis) is now stale — the camera/spawn-marker/WASD already track
+/// the new axis, but the gates keep their old plane + orientation. Drop the course + its frames so
+/// `ensure_gates_built` regenerates them on the new horizontal plane (demo ring) or reloads the
+/// saved path, re-oriented for the new up-axis.
+fn rebuild_gates_on_world_up_change(
+    mut commands: Commands,
+    config: Option<Res<CurrentSceneConfig>>,
+    course: Option<Res<RaceCourse>>,
+    roots: Query<Entity, With<GateRoot>>,
+) {
+    let (Some(config), Some(course)) = (config, course) else {
+        return;
+    };
+    if course.0.world_up == world_up_vec(config.0.world_up) {
+        return;
+    }
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    commands.remove_resource::<RaceCourse>();
+    info!("[Gates] world-up changed -> rebuilding course");
 }
 
 /// `OnEnter(ModeSelect)`: drop the course resource (visual entities are despawned by
