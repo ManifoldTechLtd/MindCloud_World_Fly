@@ -3,7 +3,8 @@
 //! A Placement-phase modal that edits a closed-loop chain of gate control points on the world's
 //! horizontal plane (height on the up-axis via Z/X), previews the closed Catmull-Rom curve, and on
 //! Accept rebuilds the live [`RaceCourse`], respawns the 3D frames (via `GateVisualsDirty`), and
-//! persists the path. Live clearance + cloud backdrop need the octree (Phase 7) → deferred.
+//! persists the path. Draws a downsampled top-down cloud backdrop (height-band filtered) from
+//! `SplatScene::cloud_points`; live per-gate clearance still needs the octree (Phase 7) → deferred.
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
@@ -58,17 +59,25 @@ fn close_editor(mut editor: ResMut<GateEditor>) {
     editor.initialized = false;
 }
 
-/// Z-up: plane = XY, height = Z. COLMAP (Y-down): plane = XZ, height = Y (matches the JS XZ tool).
+/// World <-> top-down editor-plane mapping: `(a, b, h)` where `a` -> screen-right, `b` -> screen-down
+/// (egui y-down), `h` = height along the world up-axis.
+///
+/// Z-up: plane = XY, height = +Z. The `b` axis is NEGATED (`b = -Y`) so world +Y points UP on screen,
+/// matching the 3D orbit view (a top-down `compute_orbit_camera` for Z-up has screen-right=+X,
+/// screen-down=-Y). Without the negation the editor was vertically flipped — the reported "仰视图".
+///
+/// COLMAP (Y-down): plane = XZ, height = +Y, kept as `(x, z)` to match the JS XZ tool the users
+/// already validate against (its `worldToCanvas(x, z)` maps +X->right, +Z->down).
 fn to_plane(p: Vec3, wu: WorldUp) -> (f32, f32, f32) {
     match wu {
-        WorldUp::Zup => (p.x, p.y, p.z),
+        WorldUp::Zup => (p.x, -p.y, p.z),
         WorldUp::Colmap => (p.x, p.z, p.y),
     }
 }
 
 fn from_plane(a: f32, b: f32, h: f32, wu: WorldUp) -> Vec3 {
     match wu {
-        WorldUp::Zup => Vec3::new(a, b, h),
+        WorldUp::Zup => Vec3::new(a, -b, h),
         WorldUp::Colmap => Vec3::new(a, h, b),
     }
 }
@@ -193,10 +202,24 @@ fn gate_editor_ui(
             }
             if response.drag_started_by(egui::PointerButton::Primary) {
                 editor.dragging = false;
-                if let Some(mp) = response.interact_pointer_pos() {
+                // Hit-test the PRESS ORIGIN (where the button went down), NOT interact_pointer_pos:
+                // by the time `drag_started` fires the pointer has already moved past egui's drag
+                // threshold (~6px), so testing the moved position made near-edge grabs miss — the
+                // reported "selected but won't drag" bug.
+                let press = ui
+                    .input(|i| i.pointer.press_origin())
+                    .or_else(|| response.interact_pointer_pos());
+                if let Some(mp) = press {
                     if let Some(i) = hit_test(&editor.points, wu, mp, va, vb, zoom, c) {
                         editor.selected = Some(i);
                         editor.dragging = true;
+                    } else if let Some(sel) = editor.selected {
+                        // No precise hit, but a gate is already selected: grab it with a more
+                        // forgiving radius so a slightly-off press still drags the lit-up point.
+                        let (a, b, _) = to_plane(editor.points[sel], wu);
+                        if (mp - w2c(a, b, va, vb, zoom, c)).length() <= PICK_PX * 2.5 {
+                            editor.dragging = true;
+                        }
                     }
                 }
             }
@@ -282,6 +305,36 @@ fn gate_editor_ui(
                 let y = w2c(0.0, gz, va, vb, zoom, c).y;
                 p.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], grid);
                 gz += step;
+            }
+            // Scene backdrop: faint top-down dots of the splat cloud, culled to the current height
+            // band [h_min, h_max] so you see the structures at gate height (ported from path-editor.js).
+            if !splat.cloud_points.is_empty() {
+                let dot = egui::Color32::from_rgba_unmultiplied(150, 190, 225, 140);
+                let uv = egui::epaint::WHITE_UV;
+                let r = 0.75;
+                let (hmn, hmx) = (editor.h_min, editor.h_max);
+                let mut mesh = egui::epaint::Mesh::default();
+                for pt in &splat.cloud_points {
+                    let (a, b, hgt) = to_plane(Vec3::from(*pt), wu);
+                    if hgt < hmn || hgt > hmx {
+                        continue;
+                    }
+                    let cp = w2c(a, b, va, vb, zoom, c);
+                    if !rect.contains(cp) {
+                        continue;
+                    }
+                    let i = mesh.vertices.len() as u32;
+                    for off in [(-r, -r), (r, -r), (r, r), (-r, r)] {
+                        mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(cp.x + off.0, cp.y + off.1), uv, color: dot });
+                    }
+                    mesh.indices.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+                    if mesh.vertices.len() >= 60000 {
+                        p.add(egui::Shape::mesh(std::mem::take(&mut mesh)));
+                    }
+                }
+                if !mesh.indices.is_empty() {
+                    p.add(egui::Shape::mesh(mesh));
+                }
             }
             // Spawn.
             let (ssa, ssb, _) = to_plane(spawn, wu);
