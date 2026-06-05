@@ -9,6 +9,7 @@ use crate::app_state::{AppState, CurrentSceneConfig, GameMode};
 use crate::drone::{Drone, FlightMode, KeyState};
 use crate::gate_plugin::RaceCourse;
 use crate::hud;
+use crate::input_plugin::{self, ControllerRes, HidConnection, HidDevices};
 use crate::persistence;
 use crate::placement::SpawnMarker;
 use crate::scene::SplitCamera;
@@ -46,10 +47,11 @@ impl Plugin for FlightPlugin {
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         );
-        // HUD + settings panel draw in the egui pass while flying.
+        // HUD + settings panel + pause curtain draw in the egui pass while flying.
         app.add_systems(
             EguiPrimaryContextPass,
-            (hud_system, settings_ui_system).run_if(in_state(AppState::Playing)),
+            (hud_system, settings_ui_system, pause_curtain_system)
+                .run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -109,13 +111,22 @@ fn drone_input_system(
     time: Res<Time>,
     keys_in: Res<ButtonInput<KeyCode>>,
     mut players: ResMut<Players>,
+    mut ctrl: Option<ResMut<ControllerRes>>,
+    settings_open: Res<SettingsOpen>,
+    menu: Res<crate::menu::MenuState>,
 ) {
     if players.0.is_empty() {
         return;
     }
+    // Pause physics while the settings panel or exit dialog is open: the drone freezes in place
+    // (matches native's `paused = settings_open || show_exit`). HID polling/listen continues in
+    // `input_plugin::hid_poll_system`, so channel mapping still works while the panel is up.
+    if settings_open.0 || menu.show_exit {
+        return;
+    }
     let dt = time.delta_secs();
 
-    // --- Player 1 ---
+    // --- Player 1 (keyboard + optional HID controller) ---
     {
         let p = &mut players.0[0];
         let k = &mut p.keys;
@@ -127,6 +138,7 @@ fn drone_input_system(
         k.down = keys_in.pressed(KeyCode::ArrowDown);
         k.left = keys_in.pressed(KeyCode::ArrowLeft);
         k.right = keys_in.pressed(KeyCode::ArrowRight);
+        // Keyboard arm/reset/mode stay available even when a controller is connected.
         if keys_in.just_pressed(KeyCode::Space) {
             p.armed = !p.armed;
             info!("[P1] armed = {}", p.armed);
@@ -138,8 +150,27 @@ fn drone_input_system(
             p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
             info!("[P1] flight mode = {:?}", p.drone.flight_mode);
         }
-        let armed = p.armed;
-        let input = p.keys.to_input(armed);
+
+        // A connected HID controller drives P1's sticks + arm/mode switches; else the keyboard does.
+        let hid_connected = ctrl.as_ref().map_or(false, |c| c.0.hid_connected);
+        let input = if hid_connected {
+            let ctrl = ctrl.as_deref_mut().unwrap();
+            ctrl.0.current_mode = mode_idx(p.drone.flight_mode);
+            ctrl.0.armed = p.armed; // sync keyboard/Space arm state into the controller
+            let mut hid = ctrl.0.poll_input();
+            if ctrl.0.mode_switch_triggered {
+                p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
+                info!("[P1] flight mode = {:?} (HID)", p.drone.flight_mode);
+            }
+            if ctrl.0.reset_triggered {
+                p.drone.reset_to_spawn();
+            }
+            p.armed = ctrl.0.armed; // arm switch may have toggled it
+            hid.armed = p.armed;
+            hid
+        } else {
+            p.keys.to_input(p.armed)
+        };
         p.drone.update(dt, &input);
     }
 
@@ -179,6 +210,14 @@ fn toggle_mode(m: FlightMode) -> FlightMode {
     match m {
         FlightMode::Fpv => FlightMode::Drone,
         FlightMode::Drone => FlightMode::Fpv,
+    }
+}
+
+/// Controller mode index: `0 = FPV`, `1 = Drone` (matches `Controller::mode_expo/rate` layout).
+fn mode_idx(m: FlightMode) -> usize {
+    match m {
+        FlightMode::Fpv => 0,
+        FlightMode::Drone => 1,
     }
 }
 
@@ -258,8 +297,8 @@ fn hud_system(
     Ok(())
 }
 
-/// `Update` (Playing): F1 toggles the settings panel (native uses F1). Esc still toggles the exit
-/// dialog (`menu::handle_esc`); close the panel with F1 or its `[x]`.
+/// `Update` (Playing): F1 toggles the settings panel (native uses F1). Esc closes the panel if open
+/// (`menu::handle_esc`), else opens the exit dialog; both pause flight. Close with F1 / Esc / `[x]`.
 fn settings_toggle_system(keys: Res<ButtonInput<KeyCode>>, mut settings_open: ResMut<SettingsOpen>) {
     if keys.just_pressed(KeyCode::F1) {
         settings_open.0 = !settings_open.0;
@@ -272,6 +311,10 @@ fn settings_ui_system(
     mut contexts: EguiContexts,
     mut settings_open: ResMut<SettingsOpen>,
     mut players: ResMut<Players>,
+    mut ctrl: ResMut<ControllerRes>,
+    conn: Option<Res<HidConnection>>,
+    mut devices: ResMut<HidDevices>,
+    mut commands: Commands,
 ) -> Result {
     if !settings_open.0 || players.0.is_empty() {
         return Ok(());
@@ -279,6 +322,55 @@ fn settings_ui_system(
     let Ok(ctx) = contexts.ctx_mut() else {
         return Ok(());
     };
-    settings_ui::draw_settings(ctx, &mut settings_open.0, &mut players.0[0].drone);
+    let connected = conn.as_ref().map(|c| c.product_name.as_str());
+    let action = settings_ui::draw_settings(
+        ctx,
+        &mut settings_open.0,
+        &mut players.0[0].drone,
+        &mut ctrl.0,
+        &devices.0,
+        connected,
+    );
+    match action {
+        Some(settings_ui::HidUiAction::Scan) => {
+            devices.0 = crate::input::list_hid_devices();
+            info!("[HID] scan found {} device(s)", devices.0.len());
+        }
+        Some(settings_ui::HidUiAction::Connect(idx)) => {
+            if let Some(d) = devices.0.get(idx) {
+                let (path, name) = (d.path.clone(), d.product_name.clone());
+                if let Err(e) = input_plugin::connect_hid(&mut commands, path, name) {
+                    warn!("[HID] connect failed: {}", e);
+                }
+            }
+        }
+        Some(settings_ui::HidUiAction::Disconnect) => {
+            input_plugin::disconnect_hid(&mut commands, &mut ctrl.0);
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// `EguiPrimaryContextPass` (Playing): when the settings panel or exit dialog is open, paint a
+/// full-screen dim curtain on the `Foreground` layer — above the HUD (`Middle`) but below the panel
+/// / exit dialog (both `Tooltip`). Matches native's `Color32::from_black_alpha(230)` pause overlay.
+fn pause_curtain_system(
+    mut contexts: EguiContexts,
+    settings_open: Res<SettingsOpen>,
+    menu: Res<crate::menu::MenuState>,
+) -> Result {
+    if !(settings_open.0 || menu.show_exit) {
+        return Ok(());
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    let screen = ctx.viewport_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("pause_dim"),
+    ));
+    painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(230));
     Ok(())
 }

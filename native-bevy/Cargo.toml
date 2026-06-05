@@ -28,6 +28,9 @@ web_splats = { path = "web-splat" }
 # 0.39.x targets Bevy 0.18 (0.40.0-rc.1 targets Bevy 0.19-rc → pulls a 2nd bevy, trait mismatch).
 bevy_egui = "0.39"
 
+# HID RC-transmitter input (same version as native/)
+hidapi = "2.6"
+
 # Utilities
 clap = { version = "4.6", features = ["derive"] }
 pollster = "0.4"

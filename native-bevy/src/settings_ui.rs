@@ -1,19 +1,39 @@
-//! Settings panel — egui UI for drone physics / rates / PID params. Ported from native
-//! `src/settings.rs`, **drone-only** sections (Flight Mode, Physics, FPV Rates, Drone Mode PID).
-//! The Channel-Mapping + HID-Input sections need the HID `Controller`, which isn't ported yet →
-//! deferred to Phase 5. Pure egui (changes persisted via `persistence::save_drone_settings`); the
-//! Bevy glue (F1 toggle) lives in `flight`.
+//! Settings panel — egui UI for drone physics / rates / PID + HID controller config. Ported from
+//! native `src/settings.rs` (Flight Mode, Physics, FPV Rates, Drone Mode PID) plus the HID section
+//! (device connect, axis/switch mapping, calibration, per-mode expo/rate). Pure egui (changes
+//! persisted via `persistence`); the Bevy glue (F1 toggle, device connect/disconnect) lives in `flight`.
 
 use bevy_egui::egui::{self, Color32, RichText};
 
 use crate::drone::{Drone, FlightMode};
+use crate::input::{
+    Controller, HidDeviceInfo, AXIS_NAMES, LISTEN_ARM, LISTEN_MODE, MAX_CHANNELS, SWITCH_NAMES,
+};
+
+/// Device action requested by the HID section, applied by `flight::settings_ui_system`.
+pub enum HidUiAction {
+    /// Re-enumerate HID devices.
+    Scan,
+    /// Connect to `devices[idx]`.
+    Connect(usize),
+    /// Disconnect the current device.
+    Disconnect,
+}
 
 /// Draw the settings window. `open` is bound to the window's `[x]` close button. Drone-param edits
 /// are persisted per-section (matching native).
-pub fn draw_settings(ctx: &egui::Context, open: &mut bool, drone: &mut Drone) {
+pub fn draw_settings(
+    ctx: &egui::Context,
+    open: &mut bool,
+    drone: &mut Drone,
+    ctrl: &mut Controller,
+    devices: &[HidDeviceInfo],
+    connected: Option<&str>,
+) -> Option<HidUiAction> {
     if !*open {
-        return;
+        return None;
     }
+    let mut action: Option<HidUiAction> = None;
 
     egui::Window::new("⚙ Settings")
         .open(open)
@@ -76,13 +96,177 @@ pub fn draw_settings(ctx: &egui::Context, open: &mut bool, drone: &mut Drone) {
                         if changed { let _ = crate::persistence::save_drone_settings(drone); }
                     });
 
-                // Channel-Mapping + HID-Input sections need the HID `Controller` (Phase 5).
+                // HID controller: device, mapping, switches, calibration, expo/rate.
                 ui.separator();
+                action = draw_hid_section(ui, ctrl, devices, connected);
+            }); // end ScrollArea
+        });
+
+    action
+}
+
+/// HID controller section of the settings panel. Mutates + persists `ctrl` (mapping / calibration /
+/// expo / rate) and returns a device action (scan / connect / disconnect) for the caller to apply.
+fn draw_hid_section(
+    ui: &mut egui::Ui,
+    ctrl: &mut Controller,
+    devices: &[HidDeviceInfo],
+    connected: Option<&str>,
+) -> Option<HidUiAction> {
+    let mut action: Option<HidUiAction> = None;
+
+    egui::CollapsingHeader::new("HID Device")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Status:");
+                match connected {
+                    Some(name) => {
+                        ui.colored_label(Color32::from_rgb(80, 220, 120), format!("● {name}"))
+                    }
+                    None => ui.colored_label(Color32::GRAY, "○ not connected"),
+                };
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Scan").clicked() {
+                    action = Some(HidUiAction::Scan);
+                }
+                if connected.is_some() && ui.button("Disconnect").clicked() {
+                    action = Some(HidUiAction::Disconnect);
+                }
+            });
+            for (i, d) in devices.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button("Connect").clicked() {
+                        action = Some(HidUiAction::Connect(i));
+                    }
+                    ui.label(format!(
+                        "{} ({:04x}:{:04x})",
+                        d.product_name, d.vendor_id, d.product_id
+                    ));
+                });
+            }
+            if devices.is_empty() {
                 ui.label(
-                    RichText::new("Channel Mapping & HID Input — arrives with controller support (Phase 5)")
+                    RichText::new("Press Scan to list devices.")
                         .size(10.0)
                         .color(Color32::GRAY),
                 );
-            }); // end ScrollArea
+            }
         });
+
+    // The mapping/calibration/expo sections only make sense with a live device.
+    if connected.is_none() {
+        return action;
+    }
+
+    egui::CollapsingHeader::new("Axis Mapping")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut changed = false;
+            for i in 0..4 {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{:<9}", AXIS_NAMES[i]));
+                    ui.label(format!("ch {:>2}", ctrl.axis_map[i].channel));
+                    let listening = ctrl.listening == Some(i);
+                    if ui.button(if listening { "…move…" } else { "Listen" }).clicked() {
+                        ctrl.start_listen(i);
+                    }
+                    changed |= ui.checkbox(&mut ctrl.axis_map[i].inverted, "Inv").changed();
+                    let ch = ctrl.axis_map[i].channel;
+                    if ch >= 0 && (ch as usize) < MAX_CHANNELS {
+                        let v = ctrl.hid_axes[ch as usize];
+                        ui.add(
+                            egui::ProgressBar::new((v + 1.0) / 2.0)
+                                .desired_width(110.0)
+                                .text(format!("{v:+.2}")),
+                        );
+                    }
+                });
+            }
+            if changed {
+                let _ = crate::persistence::save_controller_mapping(ctrl);
+            }
+        });
+
+    egui::CollapsingHeader::new("Switches (Arm / Mode)")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut changed = false;
+            for s in 0..2 {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{:<5}", SWITCH_NAMES[s]));
+                    ui.label(format!("ch {:>2}", ctrl.switch_channels[s]));
+                    let target = if s == 0 { LISTEN_ARM } else { LISTEN_MODE };
+                    let listening = ctrl.listening == Some(target);
+                    if ui.button(if listening { "…flip…" } else { "Listen" }).clicked() {
+                        ctrl.start_listen(target);
+                    }
+                    changed |= ui.checkbox(&mut ctrl.switch_inverted[s], "Inv").changed();
+                    changed |= ui
+                        .selectable_value(&mut ctrl.switch_level_mode[s], false, "Toggle")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut ctrl.switch_level_mode[s], true, "Level")
+                        .changed();
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("Threshold:");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut ctrl.switch_threshold).range(0.0..=1.0).speed(0.02))
+                    .changed();
+            });
+            if changed {
+                let _ = crate::persistence::save_controller_mapping(ctrl);
+            }
+        });
+
+    egui::CollapsingHeader::new("Calibration")
+        .default_open(false)
+        .show(ui, |ui| {
+            let label = if ctrl.calibrating { "Stop & Save Calibration" } else { "Start Calibration" };
+            if ui.button(label).clicked() {
+                ctrl.calibrating = !ctrl.calibrating;
+                if !ctrl.calibrating {
+                    let _ = crate::persistence::save_calibration(&ctrl.calibration);
+                }
+            }
+            if ctrl.calibrating {
+                ui.colored_label(Color32::YELLOW, "Move every stick + switch to its extremes, then Stop.");
+            }
+            for i in 0..4 {
+                let ch = ctrl.axis_map[i].channel.max(0) as usize;
+                let c = &ctrl.calibration[ch.min(MAX_CHANNELS - 1)];
+                let mark = if c.is_calibrated() { "✓" } else { "—" };
+                ui.label(format!("{mark} {:<9} min {:?}  max {:?}", AXIS_NAMES[i], c.min, c.max));
+            }
+        });
+
+    egui::CollapsingHeader::new("Expo / Rate (per mode)")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut changed = false;
+            for (mi, mname) in ["FPV", "Drone"].into_iter().enumerate() {
+                ui.label(RichText::new(mname).strong());
+                for i in 0..4 {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{:<9}", AXIS_NAMES[i]));
+                        ui.label("expo");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut ctrl.mode_expo[mi][i]).range(0.0..=1.0).speed(0.02))
+                            .changed();
+                        ui.label("rate");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut ctrl.mode_rate[mi][i]).range(0.0..=2.0).speed(0.02))
+                            .changed();
+                    });
+                }
+            }
+            if changed {
+                let _ = crate::persistence::save_controller_mapping(ctrl);
+            }
+        });
+
+    action
 }

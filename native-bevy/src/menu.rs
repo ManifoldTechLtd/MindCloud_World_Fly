@@ -7,6 +7,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use std::path::{Path, PathBuf};
 
 use crate::app_state::{AppState, GameMode};
+use crate::flight::SettingsOpen;
 use crate::menu_ui::{self, ExitAction, ModeAction, SceneAction};
 use crate::scene::SceneEntity;
 use crate::splat_plugin;
@@ -173,22 +174,39 @@ fn exit_dialog_system(
     Ok(())
 }
 
-/// ESC: menus open the quit-dialog / go back; in-game toggles the exit dialog.
+/// ESC priority (matches native): an open exit dialog closes first; otherwise menus go back / open
+/// the quit dialog, and in `Playing` it closes the settings panel if open, else opens the exit
+/// dialog. Closing either overlay resumes flight (both pause it — see `drone_input_system`).
 fn handle_esc(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<AppState>>,
     mut menu: ResMut<MenuState>,
     mut next: ResMut<NextState<AppState>>,
+    settings_open: Option<ResMut<SettingsOpen>>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
     }
+    // Priority 1: an open exit dialog always closes first (resumes flight in Playing).
+    if menu.show_exit {
+        menu.show_exit = false;
+        return;
+    }
     match state.get() {
-        AppState::ModeSelect => menu.show_exit = !menu.show_exit,
+        AppState::ModeSelect => menu.show_exit = true,
         AppState::SceneSelect => next.set(AppState::ModeSelect),
-        // Placement: Esc backs straight out to the menu (matches native). Playing: confirm dialog.
+        // Placement: Esc backs straight out to the menu (matches native).
         AppState::Placement => next.set(AppState::ModeSelect),
-        AppState::Playing => menu.show_exit = !menu.show_exit,
+        // Playing: close the settings panel if open, else open the exit dialog.
+        AppState::Playing => {
+            if let Some(mut s) = settings_open {
+                if s.0 {
+                    s.0 = false;
+                    return;
+                }
+            }
+            menu.show_exit = true;
+        }
         AppState::Loading => {}
     }
 }

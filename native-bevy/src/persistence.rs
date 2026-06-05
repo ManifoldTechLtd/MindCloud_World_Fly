@@ -149,3 +149,113 @@ pub fn load_drone_settings(drone: &mut crate::drone::Drone) {
         }
     }
 }
+
+// ---- HID controller persistence (calibration.json / mapping.json / hid_device.txt) ----
+// Same files + format as native/src/persistence.rs, in the shared config dir, so a calibration or
+// mapping created in `native/` is reused by native-bevy (and vice-versa).
+
+fn json_io_err(e: serde_json::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, e)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+struct CalibrationData {
+    /// `[min, max]` per channel.
+    channels: Vec<[Option<u16>; 2]>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct ControllerMapping {
+    axis_channels: [i32; 4],   // roll, pitch, throttle, yaw
+    axis_inverted: [bool; 4],
+    axis_expo_fpv: [f32; 4],
+    axis_expo_drone: [f32; 4],
+    axis_rate_fpv: [f32; 4],
+    axis_rate_drone: [f32; 4],
+    switch_channels: [i32; 2], // arm, mode
+    switch_inverted: [bool; 2],
+    switch_level_mode: [bool; 2],
+}
+
+/// Save HID per-channel calibration to `calibration.json`.
+pub fn save_calibration(calibration: &[crate::input::ChannelCalibration]) -> std::io::Result<()> {
+    ensure_config_dir();
+    let data = CalibrationData {
+        channels: calibration.iter().map(|c| [c.min, c.max]).collect(),
+    };
+    let json = serde_json::to_string_pretty(&data).map_err(json_io_err)?;
+    std::fs::write(config_dir().join("calibration.json"), json)
+}
+
+/// Load HID per-channel calibration from `calibration.json` (no-op if absent).
+pub fn load_calibration(calibration: &mut [crate::input::ChannelCalibration]) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join("calibration.json")) {
+        if let Ok(data) = serde_json::from_str::<CalibrationData>(&json) {
+            for (i, ch) in data.channels.iter().enumerate() {
+                if i < calibration.len() {
+                    calibration[i].min = ch[0];
+                    calibration[i].max = ch[1];
+                    calibration[i].center = None;
+                }
+            }
+        }
+    }
+}
+
+/// Save the controller axis/switch mapping + per-mode expo/rate to `mapping.json`.
+pub fn save_controller_mapping(ctrl: &crate::input::Controller) -> std::io::Result<()> {
+    ensure_config_dir();
+    let map = ControllerMapping {
+        axis_channels: std::array::from_fn(|i| ctrl.axis_map[i].channel),
+        axis_inverted: std::array::from_fn(|i| ctrl.axis_map[i].inverted),
+        axis_expo_fpv: ctrl.mode_expo[0],
+        axis_expo_drone: ctrl.mode_expo[1],
+        axis_rate_fpv: ctrl.mode_rate[0],
+        axis_rate_drone: ctrl.mode_rate[1],
+        switch_channels: ctrl.switch_channels,
+        switch_inverted: ctrl.switch_inverted,
+        switch_level_mode: ctrl.switch_level_mode,
+    };
+    let json = serde_json::to_string_pretty(&map).map_err(json_io_err)?;
+    std::fs::write(config_dir().join("mapping.json"), json)
+}
+
+/// Load the controller mapping from `mapping.json` into `ctrl` (no-op if absent).
+pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join("mapping.json")) {
+        if let Ok(map) = serde_json::from_str::<ControllerMapping>(&json) {
+            for i in 0..4 {
+                ctrl.axis_map[i].channel = map.axis_channels[i];
+                ctrl.axis_map[i].inverted = map.axis_inverted[i];
+            }
+            ctrl.mode_expo[0] = map.axis_expo_fpv;
+            ctrl.mode_expo[1] = map.axis_expo_drone;
+            ctrl.mode_rate[0] = map.axis_rate_fpv;
+            ctrl.mode_rate[1] = map.axis_rate_drone;
+            ctrl.switch_channels = map.switch_channels;
+            ctrl.switch_inverted = map.switch_inverted;
+            ctrl.switch_level_mode = map.switch_level_mode;
+        }
+    }
+}
+
+/// Save the last-used HID device path to `hid_device.txt` (for auto-connect).
+pub fn save_hid_device_path(path: &std::ffi::CStr) -> std::io::Result<()> {
+    ensure_config_dir();
+    std::fs::write(config_dir().join("hid_device.txt"), path.to_string_lossy().as_bytes())
+}
+
+/// Load the last-used HID device path (`None` if not saved / empty).
+pub fn load_hid_device_path() -> Option<std::ffi::CString> {
+    let s = std::fs::read_to_string(config_dir().join("hid_device.txt")).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    std::ffi::CString::new(s).ok()
+}
+
+/// Clear the saved HID device path (on explicit disconnect).
+pub fn clear_hid_device_path() {
+    let _ = std::fs::remove_file(config_dir().join("hid_device.txt"));
+}
