@@ -333,8 +333,9 @@ fn settings_ui_system(
     );
     match action {
         Some(settings_ui::HidUiAction::Scan) => {
-            devices.0 = crate::input::list_hid_devices();
-            info!("[HID] scan found {} device(s)", devices.0.len());
+            // RC-only list: mice/keyboards are filtered out so a pointing device can't be bound.
+            devices.0 = crate::input::list_rc_devices();
+            info!("[HID] scan found {} RC device(s)", devices.0.len());
         }
         Some(settings_ui::HidUiAction::Connect(idx)) => {
             if let Some(d) = devices.0.get(idx) {

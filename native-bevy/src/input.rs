@@ -303,6 +303,19 @@ pub struct HidDeviceInfo {
     pub product_name: String,
     pub vendor_id: u16,
     pub product_id: u16,
+    /// Top-level HID usage page / usage (USB HID usage tables) — used to reject pointing/typing
+    /// devices so the RC controller never binds to a mouse or keyboard.
+    pub usage_page: u16,
+    pub usage: u16,
+}
+
+impl HidDeviceInfo {
+    /// True for mice / keyboards / keypads (Generic Desktop page 0x01, usages Pointer 0x01,
+    /// Mouse 0x02, Keyboard 0x06, Keypad 0x07). RC transmitters enumerate as Joystick (0x04) or
+    /// Gamepad (0x05), or on a vendor-defined page, so they are NOT rejected by this test.
+    pub fn is_pointer_like(&self) -> bool {
+        self.usage_page == 0x01 && matches!(self.usage, 0x01 | 0x02 | 0x06 | 0x07)
+    }
 }
 
 /// List all available HID devices.
@@ -320,7 +333,18 @@ pub fn list_hid_devices() -> Vec<HidDeviceInfo> {
             product_name: d.product_string().unwrap_or("Unknown").to_string(),
             vendor_id: d.vendor_id(),
             product_id: d.product_id(),
+            usage_page: d.usage_page(),
+            usage: d.usage(),
         })
+        .collect()
+}
+
+/// HID devices suitable as an RC transmitter (mice / keyboards filtered out). Used by the settings
+/// device picker and auto-connect so a pointing device is never selected.
+pub fn list_rc_devices() -> Vec<HidDeviceInfo> {
+    list_hid_devices()
+        .into_iter()
+        .filter(|d| !d.is_pointer_like())
         .collect()
 }
 

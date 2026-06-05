@@ -65,17 +65,27 @@ pub fn disconnect_hid(commands: &mut Commands, ctrl: &mut Controller) {
     info!("[HID] disconnected by user");
 }
 
-/// `Startup`: reopen the last-used HID device (path written by `native/` or a prior session).
+/// `Startup`: reopen the last-used HID device (path written by `native/` or a prior session), but
+/// only if it is still present AND is not a pointing device. A mouse/keyboard saved by mistake (or
+/// by a stale path) would otherwise feed its reports as RC channels and hijack the controls — so we
+/// skip it and clear the bad save. An absent device (transmitter currently unplugged) keeps its
+/// saved path so it reconnects next launch.
 fn autoconnect_hid(mut commands: Commands) {
     let Some(path) = persistence::load_hid_device_path() else {
         return;
     };
-    let name = list_hid_devices()
-        .into_iter()
-        .find(|d| d.path == path)
-        .map(|d| d.product_name)
-        .unwrap_or_else(|| "HID device".to_string());
-    if let Err(e) = connect_hid(&mut commands, path.clone(), name) {
+    let Some(dev) = list_hid_devices().into_iter().find(|d| d.path == path) else {
+        return; // device not present right now — keep the saved path for next time.
+    };
+    if dev.is_pointer_like() {
+        warn!(
+            "[HID] saved device {:?} is a pointing device ({}); ignoring + clearing it",
+            path, dev.product_name
+        );
+        persistence::clear_hid_device_path();
+        return;
+    }
+    if let Err(e) = connect_hid(&mut commands, path.clone(), dev.product_name) {
         warn!("[HID] auto-connect failed for {:?}: {}", path, e);
     }
 }
