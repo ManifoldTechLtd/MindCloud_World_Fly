@@ -5,6 +5,7 @@ use bevy::camera::Viewport;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
+use crate::app_state::AppState;
 use crate::splat_plugin;
 
 /// Marks entities spawned for the active scene (cameras, meshes, lights) so they can be despawned
@@ -27,10 +28,15 @@ impl Plugin for ScenePlugin {
     }
 }
 
-/// Assigns each split-screen camera its viewport rect (top/bottom half) based on the current
-/// window size. Runs every frame but only writes when the rect actually changes (so window
-/// resizes are handled without spamming change detection).
-fn set_split_viewports(windows: Query<&Window>, mut cameras: Query<(&SplitCamera, &mut Camera)>) {
+/// Lays out the split-screen cameras. The split is active **only during flight** (`Playing`): each
+/// camera gets its top/bottom-half viewport. In every other state (e.g. `Placement`) the scene is a
+/// single full-window view — camera `index 0` fills the window, the rest are disabled — so placement
+/// is not split. Runs every frame but only writes when something actually changes (resize-safe).
+fn set_split_viewports(
+    state: Res<State<AppState>>,
+    windows: Query<&Window>,
+    mut cameras: Query<(&SplitCamera, &mut Camera)>,
+) {
     let Ok(window) = windows.single() else {
         return;
     };
@@ -39,9 +45,24 @@ fn set_split_viewports(windows: Query<&Window>, mut cameras: Query<(&SplitCamera
     if w == 0 || h == 0 {
         return;
     }
+    let split = *state.get() == AppState::Playing;
     let half = h / 2;
-    for (split, mut cam) in &mut cameras {
-        let (pos, size) = match split.index {
+    for (sc, mut cam) in &mut cameras {
+        if !split {
+            // Single full-window view: only camera 0 renders, full-screen (no viewport rect).
+            let active = sc.index == 0;
+            if cam.is_active != active {
+                cam.is_active = active;
+            }
+            if active && cam.viewport.is_some() {
+                cam.viewport = None;
+            }
+            continue;
+        }
+        if !cam.is_active {
+            cam.is_active = true;
+        }
+        let (pos, size) = match sc.index {
             0 => (UVec2::new(0, 0), UVec2::new(w, half)),
             _ => (UVec2::new(0, half), UVec2::new(w, h.saturating_sub(half))),
         };

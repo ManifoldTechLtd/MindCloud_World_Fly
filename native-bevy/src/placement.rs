@@ -3,6 +3,7 @@
 //! verbatim from native `placement.rs` (`compute_orbit_camera` / `update_spawn`); the resulting
 //! web-splat camera is converted to a Bevy transform with the same `* flip_x` the splat node applies.
 
+use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
@@ -225,7 +226,18 @@ fn setup_scene(
     for &(index, order) in cams {
         let mut cam = commands.spawn((
             Camera3d::default(),
-            Camera { order, ..default() },
+            Camera {
+                order,
+                // Only the first camera (order 0) clears the shared window; later split-screen
+                // cameras must LOAD, else each re-clears the whole window and erases the previous
+                // camera's viewport (which blacked out the top half in split-screen).
+                clear_color: if order == 0 {
+                    ClearColorConfig::Default
+                } else {
+                    ClearColorConfig::None
+                },
+                ..default()
+            },
             Tonemapping::None,
             Msaa::Off,
             AmbientLight {
