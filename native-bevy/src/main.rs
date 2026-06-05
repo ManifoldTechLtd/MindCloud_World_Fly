@@ -8,6 +8,7 @@
 mod app_state;
 mod drone;
 mod flight;
+mod hud;
 mod menu;
 mod menu_ui;
 mod persistence;

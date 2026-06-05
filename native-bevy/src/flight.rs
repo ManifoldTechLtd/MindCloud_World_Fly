@@ -1,10 +1,13 @@
 //! Flight phase: the player drone resource + the systems that drive it (keyboard → physics, then
 //! physics → camera). Registered by [`FlightPlugin`]; active only in `AppState::Playing`.
 
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
+use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 
 use crate::app_state::{AppState, CurrentSceneConfig};
 use crate::drone::{Drone, FlightMode, KeyState};
+use crate::hud;
 use crate::persistence;
 use crate::placement::SpawnMarker;
 use crate::splat_plugin::SplatCamera;
@@ -29,6 +32,11 @@ impl Plugin for FlightPlugin {
             (drone_input_system, drone_camera_system)
                 .chain()
                 .run_if(in_state(AppState::Playing)),
+        );
+        // HUD overlay draws in the egui pass while flying.
+        app.add_systems(
+            EguiPrimaryContextPass,
+            hud_system.run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -111,4 +119,22 @@ fn drone_camera_system(pd: Res<PlayerDrone>, mut cams: Query<&mut Transform, Wit
         t.translation = bevy_pos;
         t.rotation = bevy_rot;
     }
+}
+
+/// `EguiPrimaryContextPass` (Playing): draw the flight HUD/OSD over the splat render. Single-player
+/// (full screen, no label); split-screen per-player HUDs land with the second drone instance.
+fn hud_system(
+    mut contexts: EguiContexts,
+    pd: Res<PlayerDrone>,
+    diagnostics: Res<DiagnosticsStore>,
+) -> Result {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|d| d.smoothed())
+        .unwrap_or(0.0) as f32;
+    hud::draw_hud(ctx, &pd.drone, pd.armed, fps, None, None);
+    Ok(())
 }
