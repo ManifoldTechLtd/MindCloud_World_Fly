@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app_state::{AppState, GameMode};
 use crate::flight::SettingsOpen;
+use crate::gate_editor::GateEditor;
 use crate::menu_ui::{self, ExitAction, ModeAction, SceneAction};
 use crate::scene::SceneEntity;
 use crate::splat_plugin;
@@ -183,8 +184,13 @@ fn handle_esc(
     mut menu: ResMut<MenuState>,
     mut next: ResMut<NextState<AppState>>,
     settings_open: Option<ResMut<SettingsOpen>>,
+    gate_editor: Option<Res<GateEditor>>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    // While the gate editor is open it owns Esc (cancels the edit) — don't back out / open dialogs.
+    if gate_editor.map_or(false, |e| e.active) {
         return;
     }
     // Priority 1: an open exit dialog always closes first (resumes flight in Playing).

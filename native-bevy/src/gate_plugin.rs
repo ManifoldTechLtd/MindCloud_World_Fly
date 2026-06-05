@@ -23,6 +23,11 @@ const HORIZON: usize = 5;
 #[derive(Resource)]
 pub struct RaceCourse(pub GateCourse);
 
+/// Set by the gate editor on Accept (after it rebuilds [`RaceCourse`]) to request a fresh respawn
+/// of the 3D gate frames. `respawn_gate_visuals` consumes it.
+#[derive(Resource, Default)]
+pub struct GateVisualsDirty(pub bool);
+
 /// Parent of all gate-frame entities (also a `SceneEntity` so `menu::cleanup_scene` despawns it +
 /// its children recursively on return to the menu).
 #[derive(Component)]
@@ -39,9 +44,10 @@ pub struct GatePlugin;
 
 impl Plugin for GatePlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<GateVisualsDirty>();
         app.add_systems(
             Update,
-            ensure_gates_built.run_if(in_state(AppState::Placement)),
+            (ensure_gates_built, respawn_gate_visuals).run_if(in_state(AppState::Placement)),
         );
         app.add_systems(
             Update,
@@ -60,7 +66,7 @@ fn in_placement_or_playing(state: Res<State<AppState>>) -> bool {
 }
 
 /// World up axis as a vector (gate frames orient "up" along this). Z-up = +Z; COLMAP = -Y (gravity +Y).
-fn world_up_vec(wu: WorldUp) -> cgmath::Vector3<f32> {
+pub(crate) fn world_up_vec(wu: WorldUp) -> cgmath::Vector3<f32> {
     match wu {
         WorldUp::Zup => cgmath::Vector3::new(0.0, 0.0, 1.0),
         WorldUp::Colmap => cgmath::Vector3::new(0.0, -1.0, 0.0),
@@ -133,6 +139,31 @@ fn ensure_gates_built(
 /// `menu::cleanup_scene` via the `SceneEntity` root) so the next scene builds fresh.
 fn gate_cleanup(mut commands: Commands) {
     commands.remove_resource::<RaceCourse>();
+}
+
+/// `Update` (Placement): when the gate editor commits a new path it updates [`RaceCourse`] and sets
+/// `GateVisualsDirty`; here we despawn the old `GateRoot` (+ its frames) and respawn from the
+/// now-current course, then clear the flag.
+fn respawn_gate_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut dirty: ResMut<GateVisualsDirty>,
+    course: Option<Res<RaceCourse>>,
+    roots: Query<Entity, With<GateRoot>>,
+) {
+    if !dirty.0 {
+        return;
+    }
+    dirty.0 = false;
+    let Some(course) = course else {
+        return;
+    };
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &course.0);
+    info!("[Gates] respawned {} gate frames after edit", course.0.gates.len());
 }
 
 /// `Update` (Playing): drive pass detection + lap timing from player 0's (P1) drone position.

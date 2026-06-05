@@ -14,6 +14,8 @@ pub enum PlacementAction {
     None,
     StartFlight,
     GoBack,
+    /// Open the top-down gate-path editor (`gate_editor`).
+    EditGates,
 }
 
 /// Temporary input state for spawn/heading text fields (not yet applied). Bevy resource.
@@ -125,6 +127,10 @@ pub fn draw_overlay(
                             config.world_up = WorldUp::Colmap;
                         }
                     });
+                    ui.add_space(10.0);
+                    if ui.button(egui::RichText::new("  Edit Gate Path  ").size(13.0).color(egui::Color32::from_rgb(120, 220, 255))).clicked() {
+                        action = PlacementAction::EditGates;
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui.button(egui::RichText::new("  Start Flight (Enter)  ").size(15.0).color(egui::Color32::WHITE)).clicked() {

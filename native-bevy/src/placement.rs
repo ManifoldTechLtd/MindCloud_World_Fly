@@ -12,6 +12,7 @@ use cgmath::{InnerSpace, Rotation};
 use std::path::Path;
 
 use crate::app_state::{AppState, CurrentSceneConfig, GameMode, SceneConfig, WorldUp};
+use crate::gate_editor::GateEditor;
 use crate::menu::MenuState;
 use crate::persistence;
 use crate::placement_ui::{self, PlacementAction, PlacementUiState};
@@ -236,6 +237,7 @@ fn setup_scene(
 fn placement_orbit_system(
     ui_focus: Res<PlacementUiFocus>,
     menu: Res<MenuState>,
+    editor: Option<Res<GateEditor>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
@@ -243,7 +245,8 @@ fn placement_orbit_system(
     mut config: ResMut<CurrentSceneConfig>,
     mut cams: Query<&mut Transform, With<SplatCamera>>,
 ) {
-    let interacting = !ui_focus.wants_pointer && !menu.show_exit;
+    let editing = editor.map_or(false, |e| e.active);
+    let interacting = !ui_focus.wants_pointer && !menu.show_exit && !editing;
     // Left-drag → orbit (native: yaw += dx*0.3, pitch -= dy*0.3, clamped).
     let mut dragged = false;
     if interacting && mouse_buttons.pressed(MouseButton::Left) {
@@ -282,11 +285,13 @@ fn placement_update(
     keys: Res<ButtonInput<KeyCode>>,
     ui_focus: Res<PlacementUiFocus>,
     menu: Res<MenuState>,
+    editor: Option<Res<GateEditor>>,
     orbit: Res<OrbitState>,
     mut config: ResMut<CurrentSceneConfig>,
     mut markers: Query<&mut Transform, With<SpawnMarker>>,
 ) {
-    if !ui_focus.wants_keyboard && !menu.show_exit {
+    let editing = editor.map_or(false, |e| e.active);
+    if !ui_focus.wants_keyboard && !menu.show_exit && !editing {
         update_spawn(&mut config.0, &orbit, time.delta_secs(), &keys);
     }
     // Keep the marker (position + heading) on the spawn point. `fwd_dir` MUST equal the orbit
@@ -383,11 +388,16 @@ fn placement_overlay_system(
     mut config: ResMut<CurrentSceneConfig>,
     mut ui_state: ResMut<PlacementUiState>,
     mut ui_focus: ResMut<PlacementUiFocus>,
+    mut editor: ResMut<GateEditor>,
     scene_input: Res<SceneInput>,
     menu: Res<MenuState>,
     keys: Res<ButtonInput<KeyCode>>,
     mut next: ResMut<NextState<AppState>>,
 ) -> Result {
+    // While the gate editor is open it draws instead of this overlay (and owns Enter/Esc).
+    if editor.active {
+        return Ok(());
+    }
     let Ok(ctx) = contexts.ctx_mut() else {
         return Ok(());
     };
@@ -406,6 +416,10 @@ fn placement_overlay_system(
     if menu.show_exit {
         return Ok(());
     }
+    if matches!(action, PlacementAction::EditGates) {
+        editor.active = true;
+        return Ok(());
+    }
     match action {
         PlacementAction::StartFlight => {
             if let Some(p) = &scene_input.path {
@@ -422,7 +436,7 @@ fn placement_overlay_system(
             info!("[Placement] Back -> ModeSelect");
             next.set(AppState::ModeSelect);
         }
-        PlacementAction::None => {}
+        PlacementAction::EditGates | PlacementAction::None => {}
     }
     Ok(())
 }
