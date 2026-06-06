@@ -5,11 +5,11 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-use crate::app_state::{AppState, CurrentSceneConfig, GameMode};
-use crate::drone::{Drone, FlightMode, KeyState};
+use crate::app_state::{AppState, CurrentSceneConfig, GameMode, WorldUp};
+use crate::drone::{Drone, DroneInput, FlightMode, KeyState};
 use crate::gate_plugin::RaceCourse;
 use crate::hud;
-use crate::input_plugin::{self, ControllerRes, HidConnection, HidDevices};
+use crate::input_plugin::{self, ControllerRes, HidConnections, HidDevices};
 use crate::persistence;
 use crate::placement::SpawnMarker;
 use crate::scene::SplitCamera;
@@ -32,6 +32,10 @@ pub struct Players(pub Vec<PlayerState>);
 #[derive(Resource, Default)]
 pub struct SettingsOpen(pub bool);
 
+/// Which player the settings panel is currently configuring (the split-screen P1/P2 selector).
+#[derive(Resource, Default)]
+pub struct SettingsPlayer(pub usize);
+
 /// Wires the flight systems: drone setup on entering `Playing`, then input → physics → camera each
 /// frame while playing.
 pub struct FlightPlugin;
@@ -39,6 +43,7 @@ pub struct FlightPlugin;
 impl Plugin for FlightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsOpen>();
+        app.init_resource::<SettingsPlayer>();
         app.init_resource::<Players>();
         app.add_systems(OnEnter(AppState::Playing), setup_flight);
         app.add_systems(
@@ -60,8 +65,9 @@ impl Plugin for FlightPlugin {
 /// marker. The orbit cameras persist; `placement_orbit_system` stops (run_if Placement) and
 /// `drone_camera_system` now drives their transforms as FPV cameras (one per `SplitCamera`).
 ///
-/// SinglePlayer = 1 drone (disarmed). SplitScreen = 2 drones, P2 offset +2 on X so they don't
-/// overlap, both armed at start (ported from native).
+/// SinglePlayer = 1 drone (disarmed). SplitScreen = 2 drones started abreast — offset left (P1) and
+/// right (P2) along the heading's perpendicular so they're side by side and equidistant to a gate
+/// dead ahead — both armed at start.
 fn setup_flight(
     mut commands: Commands,
     config: Res<CurrentSceneConfig>,
@@ -69,12 +75,12 @@ fn setup_flight(
     markers: Query<Entity, With<SpawnMarker>>,
 ) {
     let s = config.0.spawn;
-    let make = |offset_x: f32| -> Drone {
+    let make = |offset: Vec3| -> Drone {
         let mut drone = Drone::new();
         drone.world_up = config.0.world_up;
         drone.spawn_heading = config.0.heading_deg;
         persistence::load_drone_settings(&mut drone);
-        drone.reset(s[0] + offset_x, s[1], s[2]);
+        drone.reset(s[0] + offset.x, s[1] + offset.y, s[2] + offset.z);
         // Stabilized (Drone) mode is far easier to fly on a keyboard than FPV acro; default to it.
         drone.flight_mode = FlightMode::Drone;
         drone
@@ -82,14 +88,26 @@ fn setup_flight(
 
     let players = match *mode {
         GameMode::SinglePlayer => vec![PlayerState {
-            drone: make(0.0),
+            drone: make(Vec3::ZERO),
             keys: KeyState::default(),
             armed: false,
         }],
-        GameMode::SplitScreen => vec![
-            PlayerState { drone: make(0.0), keys: KeyState::default(), armed: true },
-            PlayerState { drone: make(2.0), keys: KeyState::default(), armed: true },
-        ],
+        GameMode::SplitScreen => {
+            // Start the drones abreast: offset along the heading's perpendicular ("right") axis so
+            // they're side by side and equidistant to a gate dead ahead. P1 = left, P2 = right.
+            // right = fwd rotated -90° on the horizontal plane (Zup fwd=(sin h,cos h,0); Colmap
+            // fwd=(cos h,0,sin h)).
+            let h = config.0.heading_deg.to_radians();
+            let right = match config.0.world_up {
+                WorldUp::Zup => Vec3::new(h.cos(), -h.sin(), 0.0),
+                WorldUp::Colmap => Vec3::new(h.sin(), 0.0, -h.cos()),
+            };
+            let d = 2.5;
+            vec![
+                PlayerState { drone: make(-right * d), keys: KeyState::default(), armed: true },
+                PlayerState { drone: make(right * d), keys: KeyState::default(), armed: true },
+            ]
+        }
     };
     info!(
         "[Playing] {} drone(s) spawned at {:?} heading {:.1} ({:?})",
@@ -104,9 +122,10 @@ fn setup_flight(
 }
 
 /// `Update` (Playing): keyboard → `DroneInput` → physics step, per player.
-/// P1: arrows = roll/pitch, W/S = throttle, A/D = yaw, Space = arm, R = reset, M = mode.
-/// P2 (split): I/K = pitch, J/L = roll, T/G = throttle, F/H = yaw, Enter = arm, Backspace = reset,
-/// N = mode.
+/// P1: arrows = roll/pitch, W/S = throttle, A/D = yaw, Space = arm, M = mode.
+/// P2 (split): I/K = pitch, J/L = roll, T/G = throttle, F/H = yaw, Enter = arm, N = mode.
+/// `R` (or P1's controller reset switch) is a *master* reset: it returns every drone to spawn for a
+/// single fair restart — P2 has no separate reset key.
 fn drone_input_system(
     time: Res<Time>,
     keys_in: Res<ButtonInput<KeyCode>>,
@@ -126,8 +145,9 @@ fn drone_input_system(
         return;
     }
     let dt = time.delta_secs();
+    let octree = splat.collision_octree.as_ref();
 
-    // --- Player 1 (keyboard + optional HID controller) ---
+    // --- Player 1: keyboard (WASD/arrows + Space/R/M) + optional HID controller index 0 ---
     {
         let p = &mut players.0[0];
         let k = &mut p.keys;
@@ -144,41 +164,16 @@ fn drone_input_system(
             p.armed = !p.armed;
             info!("[P1] armed = {}", p.armed);
         }
-        if keys_in.just_pressed(KeyCode::KeyR) {
-            p.drone.reset_to_spawn();
-        }
         if keys_in.just_pressed(KeyCode::KeyM) {
             p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
             info!("[P1] flight mode = {:?}", p.drone.flight_mode);
         }
-
-        // A connected HID controller drives P1's sticks + arm/mode switches; else the keyboard does.
-        let hid_connected = ctrl.as_ref().map_or(false, |c| c.0.hid_connected);
-        let input = if hid_connected {
-            let ctrl = ctrl.as_deref_mut().unwrap();
-            ctrl.0.current_mode = mode_idx(p.drone.flight_mode);
-            ctrl.0.armed = p.armed; // sync keyboard/Space arm state into the controller
-            let mut hid = ctrl.0.poll_input();
-            if ctrl.0.mode_switch_triggered {
-                p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
-                info!("[P1] flight mode = {:?} (HID)", p.drone.flight_mode);
-            }
-            if ctrl.0.reset_triggered {
-                p.drone.reset_to_spawn();
-            }
-            p.armed = ctrl.0.armed; // arm switch may have toggled it
-            hid.armed = p.armed;
-            hid
-        } else {
-            p.keys.to_input(p.armed)
-        };
-        p.drone.update(dt, &input);
-        if let Some(octree) = &splat.collision_octree {
-            check_collision(&mut p.drone, octree);
-        }
+        let kbd = p.keys.to_input(p.armed);
+        let c = ctrl.as_deref_mut().map(|c| &mut c.0[0]);
+        drive_player(p, c, kbd, "P1", dt, octree);
     }
 
-    // --- Player 2 (split-screen only) ---
+    // --- Player 2 (split-screen only): keyboard IJKL/TGFH + Enter/N, or HID index 1 ---
     // P2's physical keys map onto the same `KeyState` fields so `KeyState::to_input` reproduces
     // native's `KeyStateP2::to_input`: I/K → up/down (pitch), J/L → left/right (roll), T/G → w/s
     // (throttle), F/H → a/d (yaw).
@@ -197,19 +192,55 @@ fn drone_input_system(
             p.armed = !p.armed;
             info!("[P2] armed = {}", p.armed);
         }
-        if keys_in.just_pressed(KeyCode::Backspace) {
-            p.drone.reset_to_spawn();
-        }
         if keys_in.just_pressed(KeyCode::KeyN) {
             p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
             info!("[P2] flight mode = {:?}", p.drone.flight_mode);
         }
-        let armed = p.armed;
-        let input = p.keys.to_input(armed);
-        p.drone.update(dt, &input);
-        if let Some(octree) = &splat.collision_octree {
-            check_collision(&mut p.drone, octree);
+        let kbd = p.keys.to_input(p.armed);
+        let c = ctrl.as_deref_mut().map(|c| &mut c.0[1]);
+        drive_player(p, c, kbd, "P2", dt, octree);
+    }
+
+    // Master reset: R (keyboard) or P1's controller reset switch returns EVERY drone to spawn — one
+    // fair restart for the whole race. P2 has no independent reset.
+    let p1_hid_reset = ctrl.as_ref().is_some_and(|c| c.0[0].reset_triggered);
+    if keys_in.just_pressed(KeyCode::KeyR) || p1_hid_reset {
+        for p in players.0.iter_mut() {
+            p.drone.reset_to_spawn();
         }
+        info!("[Reset] all drones reset to spawn");
+    }
+}
+
+/// Drive one player's drone for this frame: a connected HID controller (`ctrl`) supplies sticks +
+/// arm/mode; otherwise the keyboard fallback `kbd` is used. Then steps physics + collision. (Reset
+/// is a master action handled by `drone_input_system`, not per-player.)
+fn drive_player(
+    p: &mut PlayerState,
+    ctrl: Option<&mut crate::input::Controller>,
+    kbd: DroneInput,
+    label: &str,
+    dt: f32,
+    octree: Option<&crate::collision::Octree>,
+) {
+    let input = match ctrl {
+        Some(c) if c.hid_connected => {
+            c.current_mode = mode_idx(p.drone.flight_mode);
+            c.armed = p.armed; // sync keyboard/arm state into the controller
+            let mut hid = c.poll_input();
+            if c.mode_switch_triggered {
+                p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
+                info!("[{}] flight mode = {:?} (HID)", label, p.drone.flight_mode);
+            }
+            p.armed = c.armed; // arm switch may have toggled it
+            hid.armed = p.armed;
+            hid
+        }
+        _ => kbd,
+    };
+    p.drone.update(dt, &input);
+    if let Some(octree) = octree {
+        check_collision(&mut p.drone, octree);
     }
 }
 
@@ -329,11 +360,11 @@ fn settings_toggle_system(keys: Res<ButtonInput<KeyCode>>, mut settings_open: Re
 fn settings_ui_system(
     mut contexts: EguiContexts,
     mut settings_open: ResMut<SettingsOpen>,
+    mut settings_player: ResMut<SettingsPlayer>,
     mut players: ResMut<Players>,
     mut ctrl: ResMut<ControllerRes>,
-    conn: Option<Res<HidConnection>>,
+    mut conns: ResMut<HidConnections>,
     mut devices: ResMut<HidDevices>,
-    mut commands: Commands,
 ) -> Result {
     if !settings_open.0 || players.0.is_empty() {
         return Ok(());
@@ -341,15 +372,25 @@ fn settings_ui_system(
     let Ok(ctx) = contexts.ctx_mut() else {
         return Ok(());
     };
-    let connected = conn.as_ref().map(|c| c.product_name.as_str());
+    let num = players.0.len();
+    let mut sel = settings_player.0.min(num - 1);
+    // `idx` = the HID-section player (per-player controller); the upper drone params edit P1's drone
+    // (index 0) as the shared config. `&mut sel` is the selector the HID section may change.
+    let idx = sel;
+    // Clone the name so the immutable borrow of `conns` ends before the action handler mutates it.
+    let connected = conns.0[idx].as_ref().map(|c| c.product_name.clone());
     let action = settings_ui::draw_settings(
         ctx,
         &mut settings_open.0,
+        &mut sel,
+        num,
         &mut players.0[0].drone,
-        &mut ctrl.0,
+        &mut ctrl.0[idx],
         &devices.0,
-        connected,
+        connected.as_deref(),
     );
+    settings_player.0 = sel.min(num - 1);
+    let sel = settings_player.0;
     match action {
         Some(settings_ui::HidUiAction::Scan) => {
             // RC-only list: mice/keyboards are filtered out so a pointing device can't be bound.
@@ -359,15 +400,24 @@ fn settings_ui_system(
         Some(settings_ui::HidUiAction::Connect(idx)) => {
             if let Some(d) = devices.0.get(idx) {
                 let (path, name) = (d.path.clone(), d.product_name.clone());
-                if let Err(e) = input_plugin::connect_hid(&mut commands, path, name) {
+                if let Err(e) = input_plugin::connect_hid(&mut conns, sel, path, name) {
                     warn!("[HID] connect failed: {}", e);
                 }
             }
         }
         Some(settings_ui::HidUiAction::Disconnect) => {
-            input_plugin::disconnect_hid(&mut commands, &mut ctrl.0);
+            input_plugin::disconnect_hid(&mut conns, &mut ctrl.0[sel], sel);
         }
         None => {}
+    }
+    // The upper sections edit P1's drone as the single shared config; mirror those tunable settings
+    // onto every other player so all drones fly identically (only the HID config differs per player).
+    if num > 1 {
+        if let Some((p1, rest)) = players.0.split_first_mut() {
+            for p in rest {
+                p.drone.copy_settings_from(&p1.drone);
+            }
+        }
     }
     Ok(())
 }

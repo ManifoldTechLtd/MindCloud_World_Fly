@@ -20,11 +20,23 @@ pub enum HidUiAction {
     Disconnect,
 }
 
-/// Draw the settings window. `open` is bound to the window's `[x]` close button. Drone-param edits
-/// are persisted per-section (matching native).
+/// Format a calibration bound for display: the raw value, or `—` if not yet learned.
+fn fmt_cal(v: Option<u16>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// Draw the settings window. `open` is bound to the window's `[x]` close button. The upper sections
+/// (Flight Mode / Physics / FPV Rates / Drone Mode PID) edit `drone` — a single shared config for
+/// all players (the caller mirrors it onto the others). The HID section is per-player, picked by the
+/// P1/P2 switch inside it (`sel` / `num_players`). Drone-param edits persist per-section.
 pub fn draw_settings(
     ctx: &egui::Context,
     open: &mut bool,
+    sel: &mut usize,
+    num_players: usize,
     drone: &mut Drone,
     ctrl: &mut Controller,
     devices: &[HidDeviceInfo],
@@ -96,9 +108,9 @@ pub fn draw_settings(
                         if changed { let _ = crate::persistence::save_drone_settings(drone); }
                     });
 
-                // HID controller: device, mapping, switches, calibration, expo/rate.
+                // HID controller (per-player): device, mapping, switches, calibration, expo/rate.
                 ui.separator();
-                action = draw_hid_section(ui, ctrl, devices, connected);
+                action = draw_hid_section(ui, sel, num_players, ctrl, devices, connected);
             }); // end ScrollArea
         });
 
@@ -109,6 +121,8 @@ pub fn draw_settings(
 /// expo / rate) and returns a device action (scan / connect / disconnect) for the caller to apply.
 fn draw_hid_section(
     ui: &mut egui::Ui,
+    sel: &mut usize,
+    num_players: usize,
     ctrl: &mut Controller,
     devices: &[HidDeviceInfo],
     connected: Option<&str>,
@@ -118,6 +132,17 @@ fn draw_hid_section(
     egui::CollapsingHeader::new("HID Device")
         .default_open(true)
         .show(ui, |ui| {
+            // Split-screen: the controller config below is per-player — pick whose device/mapping/
+            // calibration this edits. The upper drone params stay shared across both players.
+            if num_players > 1 {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Player:").strong());
+                    for p in 0..num_players {
+                        ui.selectable_value(sel, p, format!("P{}", p + 1));
+                    }
+                });
+                ui.separator();
+            }
             ui.horizontal(|ui| {
                 ui.label("Status:");
                 match connected {
@@ -173,15 +198,6 @@ fn draw_hid_section(
                         ctrl.start_listen(i);
                     }
                     changed |= ui.checkbox(&mut ctrl.axis_map[i].inverted, "Inv").changed();
-                    let ch = ctrl.axis_map[i].channel;
-                    if ch >= 0 && (ch as usize) < MAX_CHANNELS {
-                        let v = ctrl.hid_axes[ch as usize];
-                        ui.add(
-                            egui::ProgressBar::new((v + 1.0) / 2.0)
-                                .desired_width(110.0)
-                                .text(format!("{v:+.2}")),
-                        );
-                    }
                 });
             }
             if changed {
@@ -227,19 +243,39 @@ fn draw_hid_section(
         .show(ui, |ui| {
             let label = if ctrl.calibrating { "Stop & Save Calibration" } else { "Start Calibration" };
             if ui.button(label).clicked() {
-                ctrl.calibrating = !ctrl.calibrating;
-                if !ctrl.calibrating {
-                    let _ = crate::persistence::save_calibration(&ctrl.calibration);
+                if ctrl.calibrating {
+                    // Stopping → persist the learned min/max for this player.
+                    ctrl.calibrating = false;
+                    let _ = crate::persistence::save_calibration(ctrl.player, &ctrl.calibration);
+                } else {
+                    // Starting → wipe old min/max so we re-learn this device from scratch.
+                    ctrl.reset_calibration();
+                    ctrl.calibrating = true;
                 }
             }
             if ctrl.calibrating {
                 ui.colored_label(Color32::YELLOW, "Move every stick + switch to its extremes, then Stop.");
             }
-            for i in 0..4 {
-                let ch = ctrl.axis_map[i].channel.max(0) as usize;
-                let c = &ctrl.calibration[ch.min(MAX_CHANNELS - 1)];
-                let mark = if c.is_calibrated() { "✓" } else { "—" };
-                ui.label(format!("{mark} {:<9} min {:?}  max {:?}", AXIS_NAMES[i], c.min, c.max));
+            // Per-channel raw HID input (not the 4 logical axes): list every live channel, at least
+            // 8, so any stick/switch can be identified and its learned [min, max] verified.
+            let n = ctrl.hid_channel_count.max(8).min(MAX_CHANNELS);
+            for ch in 0..n {
+                let (cmin, cmax, calibrated) = {
+                    let c = &ctrl.calibration[ch];
+                    (c.min, c.max, c.is_calibrated())
+                };
+                let raw = ctrl.hid_raw[ch];
+                let v = ctrl.hid_axes[ch];
+                let mark = if calibrated { "✓" } else { "—" };
+                ui.horizontal(|ui| {
+                    ui.label(format!("{mark} ch{ch:>2}"));
+                    ui.add(
+                        egui::ProgressBar::new((v + 1.0) / 2.0)
+                            .desired_width(150.0)
+                            .text(format!("{raw}")),
+                    );
+                    ui.label(format!("[{}, {}]", fmt_cal(cmin), fmt_cal(cmax)));
+                });
             }
         });
 

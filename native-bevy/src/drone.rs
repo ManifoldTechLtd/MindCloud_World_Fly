@@ -278,6 +278,32 @@ impl Drone {
         self.reset_to_spawn();
     }
 
+    /// Copy the *tunable settings* (not live flight state) from `src` into `self`. Used by the
+    /// split-screen settings panel to keep every player's drone on one shared config. The field set
+    /// mirrors `persistence::DroneSettings` plus `flight_mode` (the panel's upper sections).
+    pub fn copy_settings_from(&mut self, src: &Drone) {
+        self.flight_mode = src.flight_mode;
+        self.mass = src.mass;
+        self.max_thrust = src.max_thrust;
+        self.drag_cd = src.drag_cd;
+        self.drag_area = src.drag_area;
+        self.collision_radius = src.collision_radius;
+        self.drone_size = src.drone_size;
+        self.camera_mount_angle = src.camera_mount_angle;
+        self.max_pitch_rate = src.max_pitch_rate;
+        self.max_roll_rate = src.max_roll_rate;
+        self.max_yaw_rate = src.max_yaw_rate;
+        self.drone_pos_kp = src.drone_pos_kp;
+        self.drone_pos_ki = src.drone_pos_ki;
+        self.drone_pos_kd = src.drone_pos_kd;
+        self.drone_vel_kp = src.drone_vel_kp;
+        self.drone_vel_ki = src.drone_vel_ki;
+        self.drone_vel_kd = src.drone_vel_kd;
+        self.drone_alt_kp = src.drone_alt_kp;
+        self.drone_alt_ki = src.drone_alt_ki;
+        self.drone_alt_kd = src.drone_alt_kd;
+    }
+
     fn clear_pid_state(&mut self) {
         self.pos_int_x = 0.0; self.pos_int_y = 0.0; self.pos_int_z = 0.0;
         self.vel_int_x = 0.0; self.vel_int_y = 0.0; self.vel_int_z = 0.0;

@@ -23,6 +23,17 @@ fn ensure_config_dir() {
     let _ = std::fs::create_dir_all(config_dir());
 }
 
+/// Per-player config filename: player 0 keeps the original (native-shared) name; player 1+ get a
+/// numeric suffix (`calibration.json` → `calibration2.json`), so P1 + P2 store independent HID
+/// calibration / mapping / device-path without clobbering each other.
+fn player_file(stem: &str, ext: &str, player: usize) -> String {
+    if player == 0 {
+        format!("{stem}.{ext}")
+    } else {
+        format!("{stem}{}.{ext}", player + 1)
+    }
+}
+
 /// Storage key for a scene = `"{filename}_{filesize}"` (so identically-named files differ).
 /// Ported from `native/src/persistence.rs::scene_key`.
 pub fn scene_key(file_path: &Path) -> String {
@@ -178,18 +189,18 @@ struct ControllerMapping {
 }
 
 /// Save HID per-channel calibration to `calibration.json`.
-pub fn save_calibration(calibration: &[crate::input::ChannelCalibration]) -> std::io::Result<()> {
+pub fn save_calibration(player: usize, calibration: &[crate::input::ChannelCalibration]) -> std::io::Result<()> {
     ensure_config_dir();
     let data = CalibrationData {
         channels: calibration.iter().map(|c| [c.min, c.max]).collect(),
     };
     let json = serde_json::to_string_pretty(&data).map_err(json_io_err)?;
-    std::fs::write(config_dir().join("calibration.json"), json)
+    std::fs::write(config_dir().join(player_file("calibration", "json", player)), json)
 }
 
 /// Load HID per-channel calibration from `calibration.json` (no-op if absent).
-pub fn load_calibration(calibration: &mut [crate::input::ChannelCalibration]) {
-    if let Ok(json) = std::fs::read_to_string(config_dir().join("calibration.json")) {
+pub fn load_calibration(player: usize, calibration: &mut [crate::input::ChannelCalibration]) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join(player_file("calibration", "json", player))) {
         if let Ok(data) = serde_json::from_str::<CalibrationData>(&json) {
             for (i, ch) in data.channels.iter().enumerate() {
                 if i < calibration.len() {
@@ -217,12 +228,12 @@ pub fn save_controller_mapping(ctrl: &crate::input::Controller) -> std::io::Resu
         switch_level_mode: ctrl.switch_level_mode,
     };
     let json = serde_json::to_string_pretty(&map).map_err(json_io_err)?;
-    std::fs::write(config_dir().join("mapping.json"), json)
+    std::fs::write(config_dir().join(player_file("mapping", "json", ctrl.player)), json)
 }
 
 /// Load the controller mapping from `mapping.json` into `ctrl` (no-op if absent).
 pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
-    if let Ok(json) = std::fs::read_to_string(config_dir().join("mapping.json")) {
+    if let Ok(json) = std::fs::read_to_string(config_dir().join(player_file("mapping", "json", ctrl.player))) {
         if let Ok(map) = serde_json::from_str::<ControllerMapping>(&json) {
             for i in 0..4 {
                 ctrl.axis_map[i].channel = map.axis_channels[i];
@@ -239,15 +250,15 @@ pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
     }
 }
 
-/// Save the last-used HID device path to `hid_device.txt` (for auto-connect).
-pub fn save_hid_device_path(path: &std::ffi::CStr) -> std::io::Result<()> {
+/// Save player `player`'s last-used HID device path to `hid_device[N].txt` (for auto-connect).
+pub fn save_hid_device_path(player: usize, path: &std::ffi::CStr) -> std::io::Result<()> {
     ensure_config_dir();
-    std::fs::write(config_dir().join("hid_device.txt"), path.to_string_lossy().as_bytes())
+    std::fs::write(config_dir().join(player_file("hid_device", "txt", player)), path.to_string_lossy().as_bytes())
 }
 
-/// Load the last-used HID device path (`None` if not saved / empty).
-pub fn load_hid_device_path() -> Option<std::ffi::CString> {
-    let s = std::fs::read_to_string(config_dir().join("hid_device.txt")).ok()?;
+/// Load player `player`'s last-used HID device path (`None` if not saved / empty).
+pub fn load_hid_device_path(player: usize) -> Option<std::ffi::CString> {
+    let s = std::fs::read_to_string(config_dir().join(player_file("hid_device", "txt", player))).ok()?;
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -255,7 +266,7 @@ pub fn load_hid_device_path() -> Option<std::ffi::CString> {
     std::ffi::CString::new(s).ok()
 }
 
-/// Clear the saved HID device path (on explicit disconnect).
-pub fn clear_hid_device_path() {
-    let _ = std::fs::remove_file(config_dir().join("hid_device.txt"));
+/// Clear player `player`'s saved HID device path (on explicit disconnect).
+pub fn clear_hid_device_path(player: usize) {
+    let _ = std::fs::remove_file(config_dir().join(player_file("hid_device", "txt", player)));
 }

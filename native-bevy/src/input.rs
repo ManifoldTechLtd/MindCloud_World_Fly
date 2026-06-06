@@ -96,6 +96,8 @@ pub struct Controller {
     // HID state
     pub hid_axes: [f32; MAX_CHANNELS],
     pub hid_raw: [u16; MAX_CHANNELS],
+    /// Number of channels in the most recent HID report (so the UI can list every live channel).
+    pub hid_channel_count: usize,
     pub calibration: [ChannelCalibration; MAX_CHANNELS],
     pub hid_connected: bool,
 
@@ -111,6 +113,8 @@ pub struct Controller {
     pub calibrating: bool,
     /// Current flight mode index (`0=FPV, 1=Drone`) — set by the caller before `poll_input`.
     pub current_mode: usize,
+    /// Which player this controller drives (0 = P1, 1 = P2). Selects the per-player persistence files.
+    pub player: usize,
 
     /// Channel-listen mode: `Some(target)` where target `0-3` = axis, `LISTEN_ARM`/`LISTEN_MODE` = switch.
     pub listening: Option<usize>,
@@ -118,10 +122,10 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new() -> Self {
+    pub fn new(player: usize) -> Self {
         let mut calibration: [ChannelCalibration; MAX_CHANNELS] =
             std::array::from_fn(|_| ChannelCalibration::default());
-        crate::persistence::load_calibration(&mut calibration);
+        crate::persistence::load_calibration(player, &mut calibration);
 
         let mut ctrl = Self {
             axis_map: [
@@ -139,6 +143,7 @@ impl Controller {
 
             hid_axes: [0.0; MAX_CHANNELS],
             hid_raw: [0; MAX_CHANNELS],
+            hid_channel_count: 0,
             calibration,
             hid_connected: false,
 
@@ -151,6 +156,7 @@ impl Controller {
 
             calibrating: false,
             current_mode: 0,
+            player,
             listening: None,
             listen_baseline: [0.0; MAX_CHANNELS],
         };
@@ -189,6 +195,7 @@ impl Controller {
     /// Feed one raw HID report (16-bit LE channels; report-ID byte already stripped).
     pub fn feed_hid_report(&mut self, data: &[u8]) {
         let channel_count = (data.len() / 2).min(MAX_CHANNELS);
+        self.hid_channel_count = channel_count;
         for i in 0..channel_count {
             let raw = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
             self.hid_raw[i] = raw;
@@ -208,6 +215,14 @@ impl Controller {
             self.hid_axes[i] = self.calibration[i].apply(raw);
         }
         self.hid_connected = true;
+    }
+
+    /// Wipe every channel's learned min/center/max so a fresh calibration starts from scratch
+    /// (called when the user presses *Start Calibration*).
+    pub fn reset_calibration(&mut self) {
+        for c in self.calibration.iter_mut() {
+            *c = ChannelCalibration::default();
+        }
     }
 
     /// Per-frame HID input. Updates `armed` (via the arm switch) and sets the mode/reset edge flags.
