@@ -38,6 +38,7 @@ pub fn draw_settings(
     sel: &mut usize,
     num_players: usize,
     drone: &mut Drone,
+    audio: &mut crate::audio::AudioSettings,
     ctrl: &mut Controller,
     devices: &[HidDeviceInfo],
     connected: Option<&str>,
@@ -106,6 +107,37 @@ pub fn draw_settings(
                         ui.horizontal(|ui| { ui.label("Alt Ki:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_alt_ki).range(0.0..=10.0).speed(0.05)).changed(); });
                         ui.horizontal(|ui| { ui.label("Alt Kd:"); changed |= ui.add(egui::DragValue::new(&mut drone.drone_alt_kd).range(0.0..=5.0).speed(0.01)).changed(); });
                         if changed { let _ = crate::persistence::save_drone_settings(drone); }
+                    });
+
+                egui::CollapsingHeader::new("Audio")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let mut changed = false;
+                        changed |= ui.checkbox(&mut audio.muted, "Mute all").changed();
+                        ui.horizontal(|ui| {
+                            ui.label("Engine volume:");
+                            changed |= ui
+                                .add(egui::Slider::new(&mut audio.engine_volume, 0.0..=1.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("SFX volume:");
+                            changed |= ui
+                                .add(egui::Slider::new(&mut audio.sfx_volume, 0.0..=1.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Music volume:");
+                            changed |= ui
+                                .add(egui::Slider::new(&mut audio.bgm_volume, 0.0..=1.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                                .changed();
+                        });
+                        if changed {
+                            let _ = crate::persistence::save_audio_settings(audio);
+                        }
                     });
 
                 // HID controller (per-player): device, mapping, switches, calibration, expo/rate.

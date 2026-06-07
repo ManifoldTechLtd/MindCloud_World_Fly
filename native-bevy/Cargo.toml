@@ -7,6 +7,7 @@ edition = "2021"
 # Bevy for 3D mesh rendering, UI, window management
 bevy = { version = "0.18", default-features = false, features = [
     "bevy_asset",
+    "bevy_audio",
     "bevy_camera",
     "bevy_core_pipeline",
     "bevy_log",
@@ -16,6 +17,8 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_winit",
     "multi_threaded",
     "std",
+    "vorbis",
+    "wav",
     "x11",
 ] }
 

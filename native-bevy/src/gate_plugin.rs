@@ -231,6 +231,7 @@ fn gate_race_system(
     players: Option<Res<Players>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    mut sfx: MessageWriter<crate::audio::GatePassed>,
 ) {
     let Some(mut course) = course else {
         return;
@@ -257,6 +258,8 @@ fn gate_race_system(
         let d = &p.drone;
         let pos = cgmath::Vector3::new(d.x, d.y, d.z);
         for ev in c.update(dt, pos, now_ms) {
+            // Every crossing (gate pass, lap, or finish) fires one gate-ding.
+            sfx.write(crate::audio::GatePassed);
             match ev {
                 GateEvent::Passed { index, total } => {
                     info!("[Race][P{}] passed gate {} / {}", i + 1, index + 1, total);

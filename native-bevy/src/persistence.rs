@@ -150,6 +150,20 @@ pub fn load_drone_settings(drone: &mut crate::drone::Drone) {
     }
 }
 
+/// Save audio volumes + mute to `audio.json` (written when a settings slider changes).
+pub fn save_audio_settings(s: &crate::audio::AudioSettings) -> std::io::Result<()> {
+    ensure_config_dir();
+    let json = serde_json::to_string_pretty(s)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(config_dir().join("audio.json"), json)
+}
+
+/// Load audio settings from `audio.json` (`None` if absent / unparseable → caller uses defaults).
+pub fn load_audio_settings() -> Option<crate::audio::AudioSettings> {
+    let json = std::fs::read_to_string(config_dir().join("audio.json")).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
 // ---- HID controller persistence (keyed by device NAME) ----
 // A controller's config (axis/switch mapping, per-mode expo/rate, calibration) is keyed by its
 // product name, so a transmitter keeps ITS config no matter which player slot / game mode drives it.

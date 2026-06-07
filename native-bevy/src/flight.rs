@@ -621,6 +621,7 @@ fn settings_ui_system(
     mut ctrl: ResMut<ControllerRes>,
     mut conns: ResMut<HidConnections>,
     mut devices: ResMut<HidDevices>,
+    mut audio: ResMut<crate::audio::AudioSettings>,
     mode: Res<GameMode>,
 ) -> Result {
     if !settings_open.0 || players.0.is_empty() {
@@ -642,6 +643,7 @@ fn settings_ui_system(
         &mut sel,
         num,
         &mut players.0[0].drone,
+        &mut audio,
         &mut ctrl.0[idx],
         &devices.0,
         connected.as_deref(),
