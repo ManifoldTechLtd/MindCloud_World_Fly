@@ -201,7 +201,9 @@ fn draw_hid_section(
                 });
             }
             if changed {
-                let _ = crate::persistence::save_controller_mapping(ctrl);
+                // Overwrite the device's config file only if it has already been calibrated +
+                // confirmed once; otherwise the edit stays in-memory until that first save.
+                ctrl.persist_config_if_known();
             }
         });
 
@@ -234,7 +236,9 @@ fn draw_hid_section(
                     .changed();
             });
             if changed {
-                let _ = crate::persistence::save_controller_mapping(ctrl);
+                // Overwrite the device's config file only if it has already been calibrated +
+                // confirmed once; otherwise the edit stays in-memory until that first save.
+                ctrl.persist_config_if_known();
             }
         });
 
@@ -244,9 +248,11 @@ fn draw_hid_section(
             let label = if ctrl.calibrating { "Stop & Save Calibration" } else { "Start Calibration" };
             if ui.button(label).clicked() {
                 if ctrl.calibrating {
-                    // Stopping → persist the learned min/max for this player.
+                    // Stopping = calibration CONFIRM: the one moment a config file is created.
+                    // Persist the full config (mapping + switches + expo/rate + calibration) keyed
+                    // by the device name, overwriting any prior file (so it never multiplies).
                     ctrl.calibrating = false;
-                    let _ = crate::persistence::save_calibration(ctrl.player, &ctrl.calibration);
+                    ctrl.persist_config();
                 } else {
                     // Starting → wipe old min/max so we re-learn this device from scratch.
                     ctrl.reset_calibration();
@@ -300,7 +306,9 @@ fn draw_hid_section(
                 }
             }
             if changed {
-                let _ = crate::persistence::save_controller_mapping(ctrl);
+                // Overwrite the device's config file only if it has already been calibrated +
+                // confirmed once; otherwise the edit stays in-memory until that first save.
+                ctrl.persist_config_if_known();
             }
         });
 

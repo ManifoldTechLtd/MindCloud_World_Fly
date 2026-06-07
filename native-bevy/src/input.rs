@@ -113,8 +113,13 @@ pub struct Controller {
     pub calibrating: bool,
     /// Current flight mode index (`0=FPV, 1=Drone`) — set by the caller before `poll_input`.
     pub current_mode: usize,
-    /// Which player this controller drives (0 = P1, 1 = P2). Selects the per-player persistence files.
-    pub player: usize,
+    /// Product name of the connected transmitter, or `None` when disconnected. Keys this device's
+    /// saved config (mapping / calibration / expo / rate) under `controllers/<name>.json`.
+    pub device_name: Option<String>,
+    /// True once this device's config has been persisted. The FIRST write happens only on a
+    /// calibration confirm; this gate then lets later mapping/expo edits overwrite that one file,
+    /// while never creating a file for an un-calibrated transmitter.
+    pub config_persisted: bool,
 
     /// Channel-listen mode: `Some(target)` where target `0-3` = axis, `LISTEN_ARM`/`LISTEN_MODE` = switch.
     pub listening: Option<usize>,
@@ -122,12 +127,10 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(player: usize) -> Self {
-        let mut calibration: [ChannelCalibration; MAX_CHANNELS] =
-            std::array::from_fn(|_| ChannelCalibration::default());
-        crate::persistence::load_calibration(player, &mut calibration);
-
-        let mut ctrl = Self {
+    pub fn new(_player: usize) -> Self {
+        // No device is connected yet, so start from defaults; the connected transmitter's saved
+        // config (if any) is loaded by name in `set_device` at connect time.
+        Self {
             axis_map: [
                 AxisMapping { channel: 0, ..Default::default() }, // roll
                 AxisMapping { channel: 1, ..Default::default() }, // pitch
@@ -144,7 +147,7 @@ impl Controller {
             hid_axes: [0.0; MAX_CHANNELS],
             hid_raw: [0; MAX_CHANNELS],
             hid_channel_count: 0,
-            calibration,
+            calibration: std::array::from_fn(|_| ChannelCalibration::default()),
             hid_connected: false,
 
             armed: false,
@@ -156,12 +159,115 @@ impl Controller {
 
             calibrating: false,
             current_mode: 0,
-            player,
+            device_name: None,
+            config_persisted: false,
             listening: None,
             listen_baseline: [0.0; MAX_CHANNELS],
-        };
-        crate::persistence::load_controller_mapping(&mut ctrl);
-        ctrl
+        }
+    }
+
+    /// Bind this controller to a connected transmitter `name` and load ITS saved config (by name).
+    /// Resets to defaults first so a previous device's config never leaks across a reconnect. If no
+    /// saved config exists, defaults are kept and nothing is persisted until the user calibrates.
+    pub fn set_device(&mut self, name: &str) {
+        self.reset_config_to_defaults();
+        self.device_name = Some(name.to_string());
+        if let Some(cfg) = crate::persistence::load_controller_config(name) {
+            self.apply_config(&cfg);
+            self.config_persisted = true;
+            info!("[HID] loaded saved config for '{}'", name);
+        } else {
+            self.config_persisted = false;
+            info!("[HID] no saved config for '{}' — using defaults (calibrate to save)", name);
+        }
+    }
+
+    /// Forget the bound device (on disconnect): drop the name + persisted flag + live flag.
+    pub fn clear_device(&mut self) {
+        self.device_name = None;
+        self.config_persisted = false;
+        self.hid_connected = false;
+    }
+
+    /// Reset mapping / switches / expo / rate / calibration to factory defaults.
+    pub fn reset_config_to_defaults(&mut self) {
+        self.axis_map = [
+            AxisMapping { channel: 0, ..Default::default() },
+            AxisMapping { channel: 1, ..Default::default() },
+            AxisMapping { channel: 2, ..Default::default() },
+            AxisMapping { channel: 3, ..Default::default() },
+        ];
+        self.mode_expo = [[0.0; 4]; 2];
+        self.mode_rate = [[1.0; 4]; 2];
+        self.switch_channels = [-1, -1];
+        self.switch_inverted = [false, false];
+        self.switch_threshold = 0.5;
+        self.switch_level_mode = [false, false];
+        for c in self.calibration.iter_mut() {
+            *c = ChannelCalibration::default();
+        }
+    }
+
+    /// Snapshot the current mapping / switches / expo / rate / calibration for persistence.
+    pub fn export_config(&self) -> crate::persistence::ControllerConfig {
+        crate::persistence::ControllerConfig {
+            axis_channels: std::array::from_fn(|i| self.axis_map[i].channel),
+            axis_inverted: std::array::from_fn(|i| self.axis_map[i].inverted),
+            axis_expo_fpv: self.mode_expo[0],
+            axis_expo_drone: self.mode_expo[1],
+            axis_rate_fpv: self.mode_rate[0],
+            axis_rate_drone: self.mode_rate[1],
+            switch_channels: self.switch_channels,
+            switch_inverted: self.switch_inverted,
+            switch_level_mode: self.switch_level_mode,
+            switch_threshold: self.switch_threshold,
+            calibration: self.calibration.iter().map(|c| [c.min, c.max]).collect(),
+        }
+    }
+
+    /// Load a saved config into this controller (mapping / switches / expo / rate / calibration).
+    pub fn apply_config(&mut self, cfg: &crate::persistence::ControllerConfig) {
+        for i in 0..4 {
+            self.axis_map[i].channel = cfg.axis_channels[i];
+            self.axis_map[i].inverted = cfg.axis_inverted[i];
+        }
+        self.mode_expo[0] = cfg.axis_expo_fpv;
+        self.mode_expo[1] = cfg.axis_expo_drone;
+        self.mode_rate[0] = cfg.axis_rate_fpv;
+        self.mode_rate[1] = cfg.axis_rate_drone;
+        self.switch_channels = cfg.switch_channels;
+        self.switch_inverted = cfg.switch_inverted;
+        self.switch_level_mode = cfg.switch_level_mode;
+        self.switch_threshold = cfg.switch_threshold;
+        for (i, ch) in cfg.calibration.iter().enumerate() {
+            if i < MAX_CHANNELS {
+                self.calibration[i].min = ch[0];
+                self.calibration[i].max = ch[1];
+                self.calibration[i].center = None;
+            }
+        }
+    }
+
+    /// Persist this device's full config to `controllers/<name>.json` (creates or overwrites).
+    /// Called on a calibration confirm — the one moment a config is allowed to be created.
+    pub fn persist_config(&mut self) {
+        if let Some(name) = self.device_name.clone() {
+            match crate::persistence::save_controller_config(&name, &self.export_config()) {
+                Ok(()) => {
+                    self.config_persisted = true;
+                    info!("[HID] saved config for '{}'", name);
+                }
+                Err(e) => warn!("[HID] save config for '{}' failed: {}", name, e),
+            }
+        }
+    }
+
+    /// Overwrite an ALREADY-persisted config after a mapping/expo edit. No-op until the device has
+    /// been calibrated + confirmed once (so we never create a file for an un-calibrated device).
+    pub fn persist_config_if_known(&mut self) {
+        if self.config_persisted {
+            self.persist_config();
+        }
     }
 
     /// Begin listening for a channel assignment: the next channel to move > 0.5 from its current
@@ -184,7 +290,7 @@ impl Controller {
                         self.switch_channels[1] = i as i32;
                     }
                     self.listening = None;
-                    let _ = crate::persistence::save_controller_mapping(self);
+                    self.persist_config_if_known();
                     return true;
                 }
             }

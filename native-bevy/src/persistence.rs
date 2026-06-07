@@ -23,17 +23,6 @@ fn ensure_config_dir() {
     let _ = std::fs::create_dir_all(config_dir());
 }
 
-/// Per-player config filename: player 0 keeps the original (native-shared) name; player 1+ get a
-/// numeric suffix (`calibration.json` → `calibration2.json`), so P1 + P2 store independent HID
-/// calibration / mapping / device-path without clobbering each other.
-fn player_file(stem: &str, ext: &str, player: usize) -> String {
-    if player == 0 {
-        format!("{stem}.{ext}")
-    } else {
-        format!("{stem}{}.{ext}", player + 1)
-    }
-}
-
 /// Storage key for a scene = `"{filename}_{filesize}"` (so identically-named files differ).
 /// Ported from `native/src/persistence.rs::scene_key`.
 pub fn scene_key(file_path: &Path) -> String {
@@ -161,112 +150,122 @@ pub fn load_drone_settings(drone: &mut crate::drone::Drone) {
     }
 }
 
-// ---- HID controller persistence (calibration.json / mapping.json / hid_device.txt) ----
-// Same files + format as native/src/persistence.rs, in the shared config dir, so a calibration or
-// mapping created in `native/` is reused by native-bevy (and vice-versa).
+// ---- HID controller persistence (keyed by device NAME) ----
+// A controller's config (axis/switch mapping, per-mode expo/rate, calibration) is keyed by its
+// product name, so a transmitter keeps ITS config no matter which player slot / game mode drives it.
+// One file per controller (`controllers/<sanitized-name>.json`), overwritten on every save, so the
+// config dir never grows unbounded no matter how often it is re-calibrated.
 
 fn json_io_err(e: serde_json::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, e)
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
-struct CalibrationData {
-    /// `[min, max]` per channel.
-    channels: Vec<[Option<u16>; 2]>,
-}
-
+/// Full per-controller config: axis/switch mapping, per-mode expo + rate, and per-channel
+/// calibration. Serialized to `controllers/<name>.json`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct ControllerMapping {
-    axis_channels: [i32; 4],   // roll, pitch, throttle, yaw
-    axis_inverted: [bool; 4],
-    axis_expo_fpv: [f32; 4],
-    axis_expo_drone: [f32; 4],
-    axis_rate_fpv: [f32; 4],
-    axis_rate_drone: [f32; 4],
-    switch_channels: [i32; 2], // arm, mode
-    switch_inverted: [bool; 2],
-    switch_level_mode: [bool; 2],
+pub struct ControllerConfig {
+    pub axis_channels: [i32; 4],   // roll, pitch, throttle, yaw
+    pub axis_inverted: [bool; 4],
+    pub axis_expo_fpv: [f32; 4],
+    pub axis_expo_drone: [f32; 4],
+    pub axis_rate_fpv: [f32; 4],
+    pub axis_rate_drone: [f32; 4],
+    pub switch_channels: [i32; 2], // arm, mode
+    pub switch_inverted: [bool; 2],
+    pub switch_level_mode: [bool; 2],
+    pub switch_threshold: f32,
+    /// `[min, max]` per channel (`None` until learned during calibration).
+    pub calibration: Vec<[Option<u16>; 2]>,
 }
 
-/// Save HID per-channel calibration to `calibration.json`.
-pub fn save_calibration(player: usize, calibration: &[crate::input::ChannelCalibration]) -> std::io::Result<()> {
+/// `controllers/` subdir holding one JSON per known transmitter.
+fn controllers_dir() -> PathBuf {
+    config_dir().join("controllers")
+}
+
+/// Filesystem-safe stem for a controller's product name (lowercased; non-alnum → `_`).
+fn sanitize_name(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    let s = s.trim_matches('_').to_string();
+    if s.is_empty() { "controller".to_string() } else { s }
+}
+
+fn controller_config_path(name: &str) -> PathBuf {
+    controllers_dir().join(format!("{}.json", sanitize_name(name)))
+}
+
+/// Save a controller's full config to `controllers/<name>.json` (creates or OVERWRITES).
+pub fn save_controller_config(name: &str, cfg: &ControllerConfig) -> std::io::Result<()> {
+    let dir = controllers_dir();
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(cfg).map_err(json_io_err)?;
+    std::fs::write(controller_config_path(name), json)
+}
+
+/// Load a controller's saved config by name (`None` if absent / unparseable).
+pub fn load_controller_config(name: &str) -> Option<ControllerConfig> {
+    let json = std::fs::read_to_string(controller_config_path(name)).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+// ---- Last-used transmitter per (mode, slot) ----
+// Each logical slot ("single", "dual_p1", "dual_p2") remembers the NAME of the transmitter last
+// connected there, so the right device auto-connects on the next visit. Names (not paths) survive
+// replugging. Stored together in `hid_last_used.json`.
+
+fn last_used_path() -> PathBuf {
+    config_dir().join("hid_last_used.json")
+}
+
+fn load_last_used_map() -> HashMap<String, String> {
+    std::fs::read_to_string(last_used_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Remember `name` as the last-used transmitter for `slot` ("single" / "dual_p1" / "dual_p2").
+pub fn save_last_device(slot: &str, name: &str) {
     ensure_config_dir();
-    let data = CalibrationData {
-        channels: calibration.iter().map(|c| [c.min, c.max]).collect(),
-    };
-    let json = serde_json::to_string_pretty(&data).map_err(json_io_err)?;
-    std::fs::write(config_dir().join(player_file("calibration", "json", player)), json)
+    let mut map = load_last_used_map();
+    map.insert(slot.to_string(), name.to_string());
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(last_used_path(), json);
+    }
 }
 
-/// Load HID per-channel calibration from `calibration.json` (no-op if absent).
-pub fn load_calibration(player: usize, calibration: &mut [crate::input::ChannelCalibration]) {
-    if let Ok(json) = std::fs::read_to_string(config_dir().join(player_file("calibration", "json", player))) {
-        if let Ok(data) = serde_json::from_str::<CalibrationData>(&json) {
-            for (i, ch) in data.channels.iter().enumerate() {
-                if i < calibration.len() {
-                    calibration[i].min = ch[0];
-                    calibration[i].max = ch[1];
-                    calibration[i].center = None;
-                }
-            }
+/// Last-used transmitter name for `slot` (`None` if never set).
+pub fn load_last_device(slot: &str) -> Option<String> {
+    load_last_used_map().get(slot).cloned()
+}
+
+/// Forget `slot`'s last-used transmitter (on explicit disconnect).
+pub fn clear_last_device(slot: &str) {
+    let mut map = load_last_used_map();
+    if map.remove(slot).is_some() {
+        if let Ok(json) = serde_json::to_string_pretty(&map) {
+            let _ = std::fs::write(last_used_path(), json);
         }
     }
 }
 
-/// Save the controller axis/switch mapping + per-mode expo/rate to `mapping.json`.
-pub fn save_controller_mapping(ctrl: &crate::input::Controller) -> std::io::Result<()> {
-    ensure_config_dir();
-    let map = ControllerMapping {
-        axis_channels: std::array::from_fn(|i| ctrl.axis_map[i].channel),
-        axis_inverted: std::array::from_fn(|i| ctrl.axis_map[i].inverted),
-        axis_expo_fpv: ctrl.mode_expo[0],
-        axis_expo_drone: ctrl.mode_expo[1],
-        axis_rate_fpv: ctrl.mode_rate[0],
-        axis_rate_drone: ctrl.mode_rate[1],
-        switch_channels: ctrl.switch_channels,
-        switch_inverted: ctrl.switch_inverted,
-        switch_level_mode: ctrl.switch_level_mode,
-    };
-    let json = serde_json::to_string_pretty(&map).map_err(json_io_err)?;
-    std::fs::write(config_dir().join(player_file("mapping", "json", ctrl.player)), json)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Load the controller mapping from `mapping.json` into `ctrl` (no-op if absent).
-pub fn load_controller_mapping(ctrl: &mut crate::input::Controller) {
-    if let Ok(json) = std::fs::read_to_string(config_dir().join(player_file("mapping", "json", ctrl.player))) {
-        if let Ok(map) = serde_json::from_str::<ControllerMapping>(&json) {
-            for i in 0..4 {
-                ctrl.axis_map[i].channel = map.axis_channels[i];
-                ctrl.axis_map[i].inverted = map.axis_inverted[i];
-            }
-            ctrl.mode_expo[0] = map.axis_expo_fpv;
-            ctrl.mode_expo[1] = map.axis_expo_drone;
-            ctrl.mode_rate[0] = map.axis_rate_fpv;
-            ctrl.mode_rate[1] = map.axis_rate_drone;
-            ctrl.switch_channels = map.switch_channels;
-            ctrl.switch_inverted = map.switch_inverted;
-            ctrl.switch_level_mode = map.switch_level_mode;
-        }
+    #[test]
+    fn sanitize_name_is_filesystem_safe_and_stable() {
+        // A given controller always maps to the SAME single filename → re-calibration overwrites
+        // one file (no bloat); non-alnum chars are folded so the path is always valid.
+        assert_eq!(sanitize_name("RadioMaster Zorro"), "radiomaster_zorro");
+        assert_eq!(sanitize_name("  TX16S (EdgeTX)  "), "tx16s__edgetx");
+        assert_eq!(sanitize_name("RadioMaster Zorro"), sanitize_name("radiomaster zorro"));
+        // Degenerate names never produce an empty (invalid) filename.
+        assert_eq!(sanitize_name("///"), "controller");
+        assert_eq!(sanitize_name(""), "controller");
     }
-}
-
-/// Save player `player`'s last-used HID device path to `hid_device[N].txt` (for auto-connect).
-pub fn save_hid_device_path(player: usize, path: &std::ffi::CStr) -> std::io::Result<()> {
-    ensure_config_dir();
-    std::fs::write(config_dir().join(player_file("hid_device", "txt", player)), path.to_string_lossy().as_bytes())
-}
-
-/// Load player `player`'s last-used HID device path (`None` if not saved / empty).
-pub fn load_hid_device_path(player: usize) -> Option<std::ffi::CString> {
-    let s = std::fs::read_to_string(config_dir().join(player_file("hid_device", "txt", player))).ok()?;
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    std::ffi::CString::new(s).ok()
-}
-
-/// Clear player `player`'s saved HID device path (on explicit disconnect).
-pub fn clear_hid_device_path(player: usize) {
-    let _ = std::fs::remove_file(config_dir().join(player_file("hid_device", "txt", player)));
 }

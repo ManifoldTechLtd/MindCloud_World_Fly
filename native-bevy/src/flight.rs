@@ -621,6 +621,7 @@ fn settings_ui_system(
     mut ctrl: ResMut<ControllerRes>,
     mut conns: ResMut<HidConnections>,
     mut devices: ResMut<HidDevices>,
+    mode: Res<GameMode>,
 ) -> Result {
     if !settings_open.0 || players.0.is_empty() {
         return Ok(());
@@ -656,13 +657,22 @@ fn settings_ui_system(
         Some(settings_ui::HidUiAction::Connect(idx)) => {
             if let Some(d) = devices.0.get(idx) {
                 let (path, name) = (d.path.clone(), d.product_name.clone());
-                if let Err(e) = input_plugin::connect_hid(&mut conns, sel, path, name) {
-                    warn!("[HID] connect failed: {}", e);
+                // `num` = active players in this mode: in single-player a transmitter left bound to
+                // the inactive P2 slot is freed + rebound to the player. connect_hid loads the
+                // device's saved config (by name) so its mapping/calibration take effect.
+                match input_plugin::connect_hid(&mut conns, &mut ctrl.0[sel], sel, num, path, name.clone()) {
+                    Ok(()) => {
+                        // Remember this transmitter as this mode+slot's last-used (auto-reconnect).
+                        persistence::save_last_device(input_plugin::slot_key(*mode, sel), &name);
+                    }
+                    Err(e) => warn!("[HID] connect failed: {}", e),
                 }
             }
         }
         Some(settings_ui::HidUiAction::Disconnect) => {
             input_plugin::disconnect_hid(&mut conns, &mut ctrl.0[sel], sel);
+            // Forget the last-used device for this slot so it does not auto-reconnect next time.
+            persistence::clear_last_device(input_plugin::slot_key(*mode, sel));
         }
         None => {}
     }

@@ -4,7 +4,7 @@
 //! - [`HidConnections`] holds each player's open connection (device path + the background reader's
 //!   `Receiver`, in a `Mutex` so the resource is `Sync`); a slot is `Some` only while connected.
 //! - [`hid_poll_system`] drains each reader every frame into its controller and detects disconnects.
-//! - [`autoconnect_hid`] reopens each player's last-used device on startup.
+//! - [`reconcile_hid`] reconnects each active slot's last-used device once the game mode is chosen.
 //!
 //! `flight::drone_input_system` reads `ControllerRes` to drive each player when its device is on.
 
@@ -12,7 +12,8 @@ use bevy::prelude::*;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Mutex;
 
-use crate::input::{list_hid_devices, open_hid_device, Controller};
+use crate::app_state::{AppState, GameMode};
+use crate::input::{list_rc_devices, open_hid_device, Controller};
 use crate::persistence;
 
 /// Number of players that can each bind an independent HID transmitter.
@@ -52,68 +53,105 @@ impl Plugin for InputPlugin {
         app.insert_resource(ControllerRes(std::array::from_fn(Controller::new)));
         app.init_resource::<HidConnections>();
         app.init_resource::<HidDevices>();
-        app.add_systems(Startup, autoconnect_hid);
+        // Reconnect last-used transmitters once the game mode is known (not at Startup).
+        app.add_systems(OnEnter(AppState::Playing), reconcile_hid);
         app.add_systems(Update, hid_poll_system);
     }
 }
 
 /// Open `path`, start its reader thread, persist it as the last-used device, and insert the
 /// [`HidConnection`] resource (replacing any existing one). Used by auto-connect + the settings UI.
+///
+/// `active_players` = how many players are live in the current mode (1 = single, 2 = split). The
+/// same transmitter may not drive two LIVE players (their inputs would be identical), but a stale
+/// connection on an INACTIVE slot is released so the device can be rebound to the requested player.
 pub fn connect_hid(
     conns: &mut HidConnections,
+    ctrl: &mut Controller,
     player: usize,
+    active_players: usize,
     path: std::ffi::CString,
     product_name: String,
 ) -> Result<(), String> {
-    // Refuse to bind one physical device to two players: both reader threads would receive the same
-    // reports, making P1 and P2 inputs identical. Each player must use a separate transmitter.
+    // Refuse to bind one physical device to two ACTIVE players: both reader threads would receive
+    // the same reports, making their inputs identical. But a leftover connection on an INACTIVE slot
+    // (e.g. P2's auto-connected transmitter while in single-player) must NOT block rebinding — free
+    // it so the device is available to the requested player.
     if let Some(other) = conns.0.iter().position(|c| c.as_ref().is_some_and(|c| c.path == path)) {
         if other != player {
-            return Err(format!(
-                "device already bound to P{} — use a separate transmitter for P{}",
-                other + 1,
-                player + 1
-            ));
+            if other < active_players {
+                return Err(format!(
+                    "device already bound to P{} — use a separate transmitter for P{}",
+                    other + 1,
+                    player + 1
+                ));
+            }
+            conns.0[other] = None; // release the inactive slot's hold so we can rebind here
         }
     }
     let rx = open_hid_device(&path)?;
-    let _ = persistence::save_hid_device_path(player, &path);
+    // Bind this slot's controller to the device + load ITS saved config (mapping/calibration) by
+    // name, so the transmitter behaves the same in any player slot / game mode.
+    ctrl.set_device(&product_name);
     info!("[HID] P{} connected: {} ({:?})", player + 1, product_name, path);
     conns.0[player] = Some(HidConn { path, product_name, rx: Mutex::new(rx) });
     Ok(())
 }
 
-/// Explicit user disconnect: forget the saved device + drop the connection (stops the reader).
+/// Explicit user disconnect: drop the connection (stops the reader) + unbind the controller. The
+/// caller clears the per-slot last-used name so it does not auto-reconnect.
 pub fn disconnect_hid(conns: &mut HidConnections, ctrl: &mut Controller, player: usize) {
-    persistence::clear_hid_device_path(player);
-    ctrl.hid_connected = false;
+    ctrl.clear_device();
     conns.0[player] = None;
     info!("[HID] P{} disconnected by user", player + 1);
 }
 
-/// `Startup`: reopen the last-used HID device (path written by `native/` or a prior session), but
-/// only if it is still present AND is not a pointing device. A mouse/keyboard saved by mistake (or
-/// by a stale path) would otherwise feed its reports as RC channels and hijack the controls — so we
-/// skip it and clear the bad save. An absent device (transmitter currently unplugged) keeps its
-/// saved path so it reconnects next launch.
-fn autoconnect_hid(mut conns: ResMut<HidConnections>) {
-    for player in 0..NUM_PLAYERS {
-        let Some(path) = persistence::load_hid_device_path(player) else {
+/// Logical slot key for the last-used-transmitter store, by game mode + player index.
+pub fn slot_key(mode: GameMode, player: usize) -> &'static str {
+    match (mode, player) {
+        (GameMode::SinglePlayer, _) => "single",
+        (GameMode::SplitScreen, 0) => "dual_p1",
+        (GameMode::SplitScreen, _) => "dual_p2",
+    }
+}
+
+/// `OnEnter(Playing)`: reconnect each ACTIVE slot's last-used transmitter (matched by product name,
+/// so it survives replugging), loading that device's saved config. Slots unused by this mode (P2 in
+/// single-player) are released so their transmitter is free to be rebound. Runs after the game mode
+/// is chosen, so single-player and split-screen each restore their own remembered controllers.
+fn reconcile_hid(
+    mode: Res<GameMode>,
+    mut conns: ResMut<HidConnections>,
+    mut ctrl: ResMut<ControllerRes>,
+) {
+    let active = match *mode {
+        GameMode::SinglePlayer => 1,
+        GameMode::SplitScreen => 2,
+    };
+    let devices = list_rc_devices();
+    for slot in 0..active {
+        let key = slot_key(*mode, slot);
+        let Some(name) = persistence::load_last_device(key) else {
             continue;
         };
-        let Some(dev) = list_hid_devices().into_iter().find(|d| d.path == path) else {
-            continue; // device not present right now — keep the saved path for next time.
-        };
-        if dev.is_pointer_like() {
-            warn!(
-                "[HID] saved P{} device {:?} is a pointing device ({}); ignoring + clearing it",
-                player + 1, path, dev.product_name
-            );
-            persistence::clear_hid_device_path(player);
+        // Already on the right transmitter? leave the live connection alone.
+        if conns.0[slot].as_ref().is_some_and(|c| c.product_name == name) {
             continue;
         }
-        if let Err(e) = connect_hid(&mut conns, player, path.clone(), dev.product_name) {
-            warn!("[HID] P{} auto-connect failed for {:?}: {}", player + 1, path, e);
+        let Some(dev) = devices.iter().find(|d| d.product_name == name) else {
+            info!("[HID] last-used '{}' for {} not present", name, key);
+            continue;
+        };
+        let (path, pname) = (dev.path.clone(), dev.product_name.clone());
+        if let Err(e) = connect_hid(&mut conns, &mut ctrl.0[slot], slot, active, path, pname) {
+            warn!("[HID] reconnect '{}' for {} failed: {}", name, key, e);
+        }
+    }
+    // Free any slot this mode does not use, so its transmitter can be rebound elsewhere.
+    for slot in active..NUM_PLAYERS {
+        if conns.0[slot].is_some() {
+            conns.0[slot] = None;
+            ctrl.0[slot].clear_device();
         }
     }
 }
