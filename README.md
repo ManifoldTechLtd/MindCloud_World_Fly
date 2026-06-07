@@ -12,392 +12,242 @@
   <img src="asset/display/demo_teaser2.jpg" alt="MindCloud World Fly — Drone mode flight in a 3DGS scene" width="100%">
 </p>
 
-<p align="center">
-  <img src="asset/display/demo_teaser.jpg" alt="MindCloud World Fly — FPV drone flight in a 3DGS scene" width="100%">
-</p>
+A native drone flight simulator for **3D Gaussian Splatting** scenes. Fly through any 3DGS scene with
+realistic quadcopter physics, FPV or stabilized flight, single- or split-screen play, a built-in
+gate-racing mode, and RC-transmitter support.
 
-A browser-based drone flight simulator for 3D Gaussian Splatting scenes. Fly through any 3DGS scene with realistic physics, FPV or stabilized drone controls, and RC transmitter support.
+It is a **Rust / [Bevy](https://bevyengine.org) 0.18** application: Bevy renders the PBR 3D objects
+(gates, spawn marker, UI) while the proven **[web-splat](https://github.com/KeKsBoTer/web-splat)**
+Gaussian-splat renderer draws the scene as a background, both sharing one `wgpu` device with full
+depth occlusion between splats and meshes.
 
 ## About Manifold Tech
 
-[Manifold Tech Ltd.](https://manifoldtech.cn) builds tools and infrastructure for spatial intelligence. We focus on 3D reconstruction, scene understanding, and embodied AI — bridging the gap between real-world capture and interactive simulation.
+[Manifold Tech Ltd.](https://manifoldtech.cn) builds tools and infrastructure for spatial
+intelligence — 3D reconstruction, scene understanding, and embodied AI, bridging real-world capture
+and interactive simulation. Manifold Tech hardware (**Q9000**, **Pocket 2 / 2 Pro**, **Odin 1**) can
+capture high-quality 3DGS models of real environments, which load directly into MindCloud World Fly
+as flyable scenes.
 
-Manifold Tech's hardware products — including the **Q9000**, **Pocket 2 / 2 Pro**, and **Odin 1** — can capture high-quality 3D Gaussian Splatting models of real-world environments. These 3DGS scenes can then be loaded directly into MindCloud World Fly as flyable environments, enabling realistic drone flight simulation through your own scanned spaces.
+## Requirements
 
-## Quick Start
+| Requirement | Notes |
+|-------------|-------|
+| **Rust** | Stable toolchain (edition 2021). Install via [rustup](https://rustup.rs). |
+| **GPU + Vulkan** | A Vulkan-capable GPU and drivers (validated on NVIDIA RTX, Linux). `wgpu` 27 backend. |
+| **Linux / X11** | Built with the `x11` Bevy feature. Other platforms may work but are untested. |
+| **A 3DGS scene** | A `.ply` Gaussian-splat file (see [Scenes](#scenes)). |
+| **(Optional) RC transmitter** | USB HID transmitter for hardware-in-the-loop control. |
+
+## Build & Run
+
+The application lives in [`native-bevy/`](native-bevy). All commands are run from there:
 
 ```bash
-# First-time setup (run once as root for HID device permissions):
-sudo bash setup_udev.sh
+cd native-bevy
 
-# Launch everything (HTTP server + WebHID bridge + browser):
-./launch.sh          # Firefox + NVIDIA GPU (recommended)
-./launch.sh chrome   # Chrome + Intel GPU (native WebHID)
+# Build (the first build compiles Bevy and may take several minutes):
+cargo build --release
+
+# Run — opens the in-app menu (Single Player / Split Screen → Scene Select):
+cargo run --release
+
+# …or jump straight into a scene, skipping the menus:
+cargo run --release -- --input ../scene/your_scene.ply
 ```
 
-Or start the HTTP server manually:
+### Command-line options
 
-```bash
-python3 serve.py
+| Flag | Description |
+|------|-------------|
+| `-i`, `--input <PATH>` | Load a `.ply` scene immediately (skips the menu). |
+| `--split` | Split-screen, two players (default is single-player, one full-window view). |
+| `--world-up <zup\|colmap>` | Override the up-axis convention (`zup` default, `colmap` = Y-down). |
+| `--no-vsync` | Disable vsync. |
+
+> **Dev builds:** plain `cargo run` works too. The build profile optimizes dependencies
+> (`opt-level=3`) while keeping fast incremental builds of the app itself (`opt-level=1`).
+
+<a name="scenes"></a>
+## Scenes
+
+Scene files are **not** committed (too large). Drop your Gaussian-splat files into the repo's
+`scene/` directory (or `native-bevy/`); the **Scene Select** menu scans `.`, `scene/`, and
+`../scene/` for `*.ply`, `*.splat`, and `*.sog` files.
+
+```
+scene/
+└── your_scene.ply
 ```
 
-Open **http://localhost:8080** in your browser (Chrome/Edge recommended for native Gamepad API; Firefox supported via WebHID bridge).
+Two ready-to-fly demo scenes captured with Manifold Tech hardware:
 
-### Scene Files
-
-Scene files (`.ply`, `.sog`) are not included in this repository due to their large size. After cloning, place your 3D Gaussian Splatting scene files into the `scene/` directory:
-
-    scene/
-    ├── your_scene.ply
-    └── your_scene.sog
-
-The simulator will load scenes from this directory automatically. You can also drag and drop files directly onto the page from any location.
-
-## Supported Formats
-
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| PLY    | `.ply`    | Standard 3DGS point cloud |
-| SPLAT  | `.splat`  | Compressed splat format (auto-converted to PLY for rendering) |
-| SOG    | `.sog`    | Compressed archive format (always Y-up) |
-
-Drag and drop a file onto the page, or click **Choose File** to browse.
-
-## Demo Scenes
-
-Two ready-to-fly demo scenes are available on Google Drive. Both were captured using Manifold Tech hardware and reconstructed as 3D Gaussian Splatting models of real-world environments. Download a `.sog` file, then drag and drop it onto the page to start flying immediately.
-
-### Field (Z-up)
+- [**field_z-up**](https://drive.google.com/file/d/11yztizITalnHwnichd4iXHVaQbMYplTD/view?usp=sharing) — outdoor field, **Z-up** (`--world-up zup`).
+- [**nanjing**](https://drive.google.com/file/d/1ft5q-ALGwFB3hp44vt648kdYUoNi_S9f/view?usp=sharing) — urban scene captured in Nanjing, China.
 
 <p align="center">
-  <img src="asset/display/demo_field.gif" alt="MindCloud World Fly — Field scene flight demo" width="100%">
+  <img src="asset/display/demo_field.gif" alt="Field scene flight demo" width="49%">
+  <img src="asset/display/demo_nanjing.gif" alt="Nanjing scene flight demo" width="49%">
 </p>
 
-[**field_z-up.sog**](https://drive.google.com/file/d/11yztizITalnHwnichd4iXHVaQbMYplTD/view?usp=sharing) — an outdoor field environment. This scene uses the **Z-up** coordinate system, so select **Z-up** in the coordinate system dropdown during the filter step.
+## How it plays
 
-### Nanjing
+1. **Mode** — pick *Single Player* or *Split Screen (2 Players)* (or pass `--split`).
+2. **Scene** — select a scene file; it loads on a background thread (point cloud + collision octree).
+3. **Placement** — position the spawn point with an orbit camera, optionally draw a gate course.
+4. **Fly** — press **Enter** to start; arm the drone and fly.
 
-<p align="center">
-  <img src="asset/display/demo_nanjing.gif" alt="MindCloud World Fly — Nanjing scene flight demo" width="100%">
-</p>
+### Placement controls
 
-[**nanjing.sog**](https://drive.google.com/file/d/1ft5q-ALGwFB3hp44vt648kdYUoNi_S9f/view?usp=sharing) — an urban scene captured in Nanjing, China.
+| Input | Action |
+|-------|--------|
+| **W / A / S / D** | Move spawn horizontally (camera-relative) |
+| **Q / E** | Move spawn down / up |
+| **Shift** | Move faster |
+| **Left-drag / Scroll** | Orbit camera / zoom |
+| **Edit Gate Path** (button) | Open the top-down gate-course editor |
+| **Enter** | Start flight |
+| **Esc** | Back to menu |
 
-## User Guide
+### Flight controls (keyboard)
 
-### Step 1: Load a Scene
-
-1. Open the app in your browser at **http://localhost:8080**
-2. **Drag and drop** a `.ply`, `.splat`, or `.sog` file onto the page, or click **Choose File**
-3. Wait for parsing and engine initialization (progress shown on screen)
-
-### Step 2: Filter the Scene
-
-After loading, you enter the **Filter** stage with an orbit camera view of the full scene:
-
-- **Distance** slider — crop points beyond a radius from the scene centroid (removes outliers and sky noise)
-- **Opacity** slider — hide low-opacity Gaussians (cleans up semi-transparent artifacts)
-- **Up Axis** selector — choose **Z-Up** or **Y-Up** to match your scene's coordinate system. The preview updates live as you switch. For `.sog` files this is auto-set to Y-Up and hidden.
-- **Point count** is displayed in real time as you adjust sliders
-
-Camera controls during filtering:
-- **Left-drag** to orbit
-- **Scroll** to zoom
-
-Click **Apply** when satisfied. The chosen coordinate system is locked and shown (read-only) in the settings panel.
-
-> **Tip:** If the scene appears sideways or upside down, you likely have the wrong Up Axis. Press **Esc** to exit and reload the file with the correct setting.
-
-### Step 3: Place the Drone
-
-After filtering, you enter **Placement Mode**:
-
-| Control | Action |
-|---------|--------|
-| W / S | Move drone forward / back (relative to camera view) |
-| A / D | Move drone left / right |
-| Q / E | Move drone down / up |
-| Left-drag | Orbit camera around drone |
-| Scroll | Zoom in / out |
-| Enter | Confirm placement and start flying |
-| Esc | Exit scene (with confirmation) |
-
-A blue marker shows the drone's spawn position. The camera orbits around it as you move.
-
-### Step 4: Fly
-
-Press **Enter** to confirm placement. The view switches to the drone's onboard camera.
-
-**Before you can fly, you must arm the drone:**
-- Press **Space** on keyboard, or
-- Press the assigned arm button on your controller
-
-The status indicator at the bottom of the screen shows **ARMED** (green) or **DISARMED** (red).
-
-### Flight Controls (Keyboard)
+| Player 1 | Player 2 (split) | Action |
+|----------|------------------|--------|
+| **W / S** | **T / G** | Throttle up / down |
+| **A / D** | **F / H** | Yaw left / right |
+| **↑ / ↓** | **I / K** | Pitch forward / back |
+| **← / →** | **J / L** | Roll left / right |
+| **Space** | **Enter** | Arm / disarm |
+| **M** | **N** | Toggle flight mode (FPV ↔ Drone) |
+| **R** | — | Reset drone(s) to spawn |
 
 | Key | Action |
 |-----|--------|
-| W / S | Throttle up / down |
-| A / D | Yaw left / right |
-| ↑ / ↓ | Pitch forward / back |
-| ← / → | Roll left / right |
-| Q / E | Camera tilt up / down (drone mode) |
-| Space | Arm / disarm toggle |
-| R | Reset drone to spawn point |
-| M | Toggle flight mode (FPV ↔ Drone) |
-| Shift | Boost (1.5× thrust) |
-| P | Return to placement mode (reposition drone) |
-| Tab | Open settings panel |
-| Esc | Close settings panel, or exit scene |
+| **F1** | Open / close the settings panel (pauses flight) |
+| **G** | Toggle gate-course visibility |
+| **P** | Start the 3-2-1 race countdown (split-screen race) |
+| **Esc** | Exit-scene dialog (or close settings) |
 
-### Flight Controls (RC Transmitter)
+You must **arm** (Space) before the drone responds.
 
-Connect your RC transmitter via USB. It is detected via the browser Gamepad API or the WebHID bridge (for browsers like Firefox that lack native WebHID support).
-
-To connect via WebHID bridge:
-1. Open settings (**Tab**)
-2. Check **Disable Gamepad API (for WebHID)**
-3. Click **Connect HID Device** and select your transmitter
-4. Run calibration if prompted
-
-Default channel mapping (AETR):
-
-| Axis | Action |
-|------|--------|
-| 0 | Roll |
-| 1 | Pitch |
-| 2 | Throttle |
-| 3 | Yaw |
-| Button 0 | Arm toggle (gamepad button; assignable) |
-| (assignable) | Flight-mode switch (any button or channel) |
-
-Reset is keyboard-only (press **R**); it has no RC / gamepad binding.
-
-### Flight Modes
+### Flight modes
 
 | Mode | Behavior |
 |------|----------|
-| **Drone (Easy)** | Stabilized flight with position and altitude hold. Sticks command velocity — release to hover. Yaw stick commands yaw rate; release simply stops the turn, so the drone keeps whatever heading it had. Cascaded PID controller keeps the drone level and on target. Best for exploration. |
-| **FPV (Manual)** | Direct rate control — sticks map to body-frame angular rates (pitch, roll, yaw). No self-leveling. Throttle directly controls thrust. Requires constant pilot input. Realistic FPV experience. |
+| **Drone (stabilized)** | Position/altitude hold; sticks command velocity, release to hover. Cascaded PID keeps it level. Best for exploration. |
+| **FPV (manual rate)** | Direct body-rate control, no self-leveling, throttle = thrust. Realistic FPV feel. |
 
-Switch modes at any time by pressing **M**, by mapping an RC channel to the **Mode Switch** action in the settings panel, or by using the dropdown in the settings panel (**Tab**). An RC binding can be configured as either **Toggle** (a flick flips the mode, like a momentary button) or **Level** (switch-up = FPV, switch-down = Drone — the channel position *is* the mode). Switching from FPV to Drone levels roll and pitch while preserving the current heading. Each mode stores its own independent set of **PID gains** and **Rate/Expo** parameters, so tuning one mode does not affect the other.
+Switch any time with **M** (P2: **N**), or via the settings panel. Each mode keeps its own PID gains
+and rate/expo parameters. Auto-levels on disarm.
 
-**Drone mode** uses a fixed camera tilt angle (set in settings, 0–60°). **FPV mode** uses a fixed mount angle during flight; adjust Q/E before arming, or set it in settings.
+### HUD / OSD
 
-### HUD & OSD
+Fighter-jet style overlay: artificial horizon + pitch ladder, speed/altitude tapes, heading compass,
+vertical-speed indicator, armed state, FPS, and (during a race) lap timer + gate count. In
+split-screen each half draws its own HUD.
 
-During flight, the screen displays:
+## Gate racing
 
-- **HUD (corners):** altitude, vertical speed, ground speed, FPS, controller status, armed state
-- **OSD (center overlay):** artificial horizon with pitch ladder, heading compass, altitude and speed tapes, vertical speed indicator, flight mode label
-- **Collision warning:** screen flashes red and shows "COLLISION" text on impact
+Draw a **closed-loop gate course** in the top-down editor (placement → **Edit Gate Path**), then race
+it for best lap time. Gates are sensor rings on a smooth Catmull-Rom spline; pass-through is detected
+per frame (the drone never physically collides with them).
 
-The FPV OSD overlay can be toggled on/off in settings (Display → FPV OSD Overlay).
+**Editor:** left-click to add a gate, drag to move, **Z / X** to lower / raise altitude,
+**Del / Backspace** to remove, wheel to zoom, right-drag to pan, **Enter** to accept (≥ 3 gates),
+**Esc** to cancel. Each gate previews **green** when clear of the point cloud, **red** when it
+intersects geometry.
 
-### Settings Panel
+- **Single-player** = lap racing (the course loops; best lap is saved per scene).
+- **Split-screen** = a head-to-head linear race: press **P** for a 3-2-1 countdown, first to cross the
+  last gate wins (per-half **FINISH No.1 / No.2** banners). **R** restarts the race.
 
-Press **Tab** to open. Sections:
+Gate frames render with a black/white checker start gate and per-face shading; only the next few gates
+ahead are shown while flying.
 
-- **Display** — Clean Mode (hides logo and key guide only; HUD and OSD remain visible), FPV OSD toggle
-- **RC Channel Assignment** — assign and invert axes, set dead zones (default 0), with listen-mode auto-detect
-- **Button Assignment** — assign **Arm** and **Mode Switch** to a gamepad button or an RC channel. Each axis binding has an **Inv** toggle (flip which end counts as active) and a **Toggle / Level** trigger dropdown. Reset is keyboard-only.
-- **Rates & Expo** — per-axis rate multiplier and expo curve (stored independently per flight mode)
-- **Audio** — independent **Mute** checkbox + volume slider for **Engine Sound** and **Background Music**. Ticking Mute snaps the slider to 0 (remembering the previous position); un-ticking restores it. Dragging the slider to 0 auto-ticks Mute; dragging above 0 auto-unticks it. BGM cycles tracks from `asset/music/init/` during loading / filtering / placement and shuffles tracks from `asset/music/flight/` during flight — just drop additional `.flac` / `.mp3` / `.ogg` / `.wav` files into either folder and they're auto-discovered (see **Background Music** below for deployment notes).
-- **Gamepad Status** — shows connected controller name; option to disable Gamepad API for WebHID
-- **Channel Monitor** — real-time axis values from the gamepad
-- **Coordinate System** — shows the Up Axis chosen during filtering (read-only)
-- **Flight Mode** — switch between Drone (Easy) and FPV (Manual); parameters swap automatically
-- **Camera** — horizontal FOV, FPV mount angle (0–60°)
-- **Controller Gains** — tune Pos Kp/Ki/Kd, Vel Kp/Ki/Kd, Alt Kp/Ki/Kd with number inputs (stored independently per flight mode)
-- **Physics** — mass, max thrust, drag Cd, frontal area, drone size, collision radius
-- **Export / Import** — save or load full configuration as JSON (includes both flight mode parameter sets)
+## Physics & collision
 
-All settings persist automatically in `localStorage`.
+Quaternion-based rigid-body physics: thrust along the body up-axis, quadratic aerodynamic drag, and
+gravity. Tunable live in the settings panel (mass, max thrust, drag, frontal area, drone size,
+collision radius).
 
-### Remapping Controls
+Collision uses an **octree** built from the scene's Gaussian centers (filtered by opacity). On impact
+the drone is pushed out along the surface normal and its velocity is reflected/damped, with a red
+on-screen collision flash.
 
-1. Press **Tab** to open settings
-2. Click **Assign** next to any axis or button action
-3. Move the stick or press the button on your transmitter
-4. Use **Invert** checkbox if axis direction is reversed
-5. Adjust **Dead Zone** sliders as needed (default is 0)
+## RC transmitter (HID)
 
-You can also **Export** / **Import** full configs as JSON files to share between browsers or back up your setup.
-
-### Background Music
-
-BGM tracks live in two subfolders, each corresponding to a named playlist:
-
-- `asset/music/init/` — looped during loading, filtering, and placement
-- `asset/music/flight/` — shuffled during flight
-
-**Adding a track**: drop any `.flac` / `.mp3` / `.ogg` / `.wav` file into either folder. At page load, `src/main.js` discovers tracks via two strategies in order:
-
-1. **HTTP directory listing** — works with `serve.py`, `python -m http.server`, `npx http-server`, and most dev servers that return an HTML index when no `index.html` is present. No extra steps required.
-2. **`manifest.json` fallback** — needed for static hosts like GitHub Pages / Netlify that don't list directories. Run `python scripts/gen-bgm-manifests.py` after adding/removing tracks; it scans each playlist folder and writes a fresh `manifest.json`.
-
-So the full workflow for a new `playing3.flac`:
+Connect a USB RC transmitter (RadioMaster, FrSky, Jumper, ELRS, generic HID). On Linux, grant non-root
+access to the device once:
 
 ```bash
-cp ~/Music/playing3.flac asset/music/flight/
-python scripts/gen-bgm-manifests.py    # only needed if deploying
-git add asset/music/flight/playing3.flac asset/music/flight/manifest.json
-git commit -m "bgm: add playing3.flac"
+sudo bash setup_udev.sh   # writes udev rules + adds you to the plugdev group (re-login after)
 ```
 
-Disable BGM temporarily with the URL param `?nobgm=1`; disable the engine sound with `?noaudio=1`.
+Then open the settings panel (**F1**) → scan & connect the device, assign axes (Roll / Pitch /
+Throttle / Yaw) and the Arm / Mode switches with listen-mode auto-detect, set inversion / dead-zones,
+and run calibration. Each transmitter's configuration is saved by device name; the last-used device is
+remembered per mode/slot.
 
-## Physics
+## Settings panel (F1)
 
-Quaternion-based orientation with body-frame rotations. Thrust along local up axis, quadratic aerodynamic drag, and gravity.
+- **Flight Mode** — FPV / Drone (parameters swap automatically).
+- **Physics** — mass, max thrust, drag Cd, frontal area, drone size, collision radius.
+- **Rates & Expo** — per-axis rate + expo (stored per mode).
+- **Controller Gains** — cascaded PID (position / velocity / altitude), per mode.
+- **RC / Buttons** — channel mapping, calibration, Arm / Mode switch assignment (Toggle / Level).
+- **Audio** — engine / SFX / music volume sliders + mute.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Mass | 500 g | Drone mass |
-| Max Thrust | 1000 gf | Maximum thrust force |
-| Drag Cd | 1.0 | Drag coefficient |
-| Frontal Area | 0.01 m² | Reference area for drag |
-| Drone Size | 0.3 m | Width/depth of drone body |
-| Collision Radius | 0.3 m | Bounding sphere for collision |
-| Gravity | 9.81 m/s² | Fixed |
+All settings persist as JSON under `~/.config/mindcloud-fly/` (`scenes.json`, `drone.json`,
+`audio.json`, `controllers/<name>.json`, `gate-paths/<scene>.json`).
 
-All parameters (including controller PI gains) are adjustable live in the settings panel.
+## Audio
 
-## Collision
+- **Engine sound** — throttle-driven pitch/volume (smoothed per-sample).
+- **Gate-pass SFX** + **3-2-1-GO countdown** beeps (procedurally generated).
+- **Background music** — playlists discovered from `native-bevy/assets/audio/bgm/<init|flight>/`; drop
+  any `.ogg` / `.wav` in and it joins the rotation on the next launch.
 
-Gaussian center positions are filtered by distance and opacity, then built into an octree spatial index. On collision:
-- Drone is pushed out along the estimated surface normal
-- Velocity is reflected and dampened
-- Screen flashes red + HUD shows collision warning
-
-## Race Course
-
-A **closed-loop gate track** you draw yourself with a top-down path editor, then race for best lap time. Every gate you place becomes a sensor ring on a smooth Catmull-Rom spline; the drone never physically collides with them, pass-through is detected as a segment-vs-plane test per frame.
-
-### Workflow
-
-1. Drop / pick a scene as usual.
-2. Open settings (**Tab → Race Course**) and click **Edit path…**.
-3. In the modal: left-click to drop gates, drag to nudge, `Z` / `X` to lower / raise the selected gate's altitude. Each gate lights **green** when its frame is clear of cloud geometry and **red** when it intersects the point cloud.
-4. Close the loop by placing ≥ 3 gates, click **Accept**. The path is saved to `asset/gate-paths/<sceneName>_<size>.json` via the server API, so the next time you load the same scene your track is recovered automatically.
-5. In flight mode, press **G** to toggle gate visibility on / off. First press enables it; timer doesn't start until you cross gate 1.
-6. Fly the course. Lap timer runs from gate 1 → through all gates in order → gate 1 again. Crossing a gate out of order turns the current lap red (`MISS` label) — the timer keeps running but that lap is not recorded. Best lap per scene is persisted the instant it's set.
-
-### Editor controls
-
-| Input | Effect |
-|---|---|
-| Left-click empty space | Append new gate at cursor (Y = midpoint of yMin / yMax) |
-| Left-click a gate | Select (highlighted orange) |
-| Drag a selected gate | Move its XZ (altitude preserved) |
-| `Z` / `X` with a selection | Lower / raise by 0.1 m (1 m with Shift), clamped to yMin / yMax |
-| `Del` / `Backspace` (with selection) | Remove the selected gate |
-| `Backspace` (no selection) | Undo last appended gate |
-| Wheel | Zoom around cursor |
-| Right-drag | Pan |
-| `Enter` | Accept (≥ 3 gates required) |
-| `Esc` | Cancel without saving |
-
-The `y min` / `y max` sliders clamp every gate's altitude and filter the octree-point backdrop so you only see clouds at the altitude band you intend to fly.
-
-### Flight-mode controls for the course
-
-| Key | Effect |
-|---|---|
-| **G** | Toggle the gate course visible / hidden (no-op if no path drawn) |
-| **R** | Reset drone to spawn + clear current-lap progress (path + best lap preserved) |
-
-### Settings panel (Tab → Race Course)
-
-| Setting | Effect |
-|---|---|
-| **Gate size** | Edge length of the square ring — used both visually and for pass detection |
-| **Clearance** | Radius used by the editor's live red/green check around each gate |
-| **Path** | Status line + **Edit path…** / **Clear** buttons. "Clear" deletes the per-scene JSON file and resets best-lap for this scene (after a confirm dialog) |
-
-### Persistence (`asset/gate-paths/`)
-
-Each scene gets its own `<safeName>_<fileSize>.json` record containing:
-
-- `coordSystem` — the zup / yup choice committed in the filter UI (re-pre-filled on next load)
-- `path` — gates (points + yMin / yMax), gateSize, clearance
-- `bestLapMs` — best lap ever recorded for this scene
-
-The server (`serve.py`) exposes the record via `GET / PUT / DELETE /api/path/<safeName>.json`. Records are developer-local (the directory's `.gitignore` excludes `*.json`); delete the file by hand or via the **Clear** button.
-
-**Colour legend**: next gate **yellow** (pulsing), upcoming **cyan**, already-passed **green** for the current lap. HUD shows `Lap N · 00:42.3 · best 00:39.1` above `Gate X / N`.
-
-## Project Structure
+## Project structure
 
 ```
-├── index.html              # UI layout and styles
-├── serve.py                # Simple HTTP dev server (CORS + ES module headers)
-├── launch.sh               # One-click launcher (HTTP server + WebHID bridge + browser)
-├── hid_server.py           # WebHID bridge server (ws://localhost:8766)
-├── setup_udev.sh           # udev rules for non-root HID device access
-├── scripts/
-│   └── gen-bgm-manifests.py  # Regenerate asset/music/*/manifest.json after adding tracks
-├── .gitignore              # Excludes scene/, raw audio source, and tools/
+native-bevy/
+├── Cargo.toml              # mindcloud-fly-bevy crate
 ├── src/
-│   ├── main.js             # App init, scene loading, game loop
-│   ├── controller.js       # Keyboard + gamepad + WebHID input, per-mode settings UI
-│   ├── drone.js            # Quaternion physics, FPV/drone control laws, PID controller
-│   ├── collision.js        # Octree spatial index + collision response
-│   ├── gates.js            # Closed-loop race course from user path + lap timer (Phase B)
-│   ├── path-editor.js      # Modal top-down gate-path editor (click/drag/Z-X)
-│   ├── path-store.js       # Per-scene JSON path persistence client (fetch to /api/path)
-│   ├── catmull-rom.js      # Centripetal closed-loop Catmull-Rom curve math
-│   ├── hud.js              # Head-up display overlay
-│   ├── osd.js              # On-screen display (artificial horizon, telemetry)
-│   ├── audio.js            # FPV engine sound (sample playback + throttle-modulated rate)
-│   ├── bgm.js              # Playlist-based background music (FLAC tracks from asset/music/)
-│   ├── webhid_polyfill.js  # WebHID API polyfill for Firefox (proxies via hid_server.py)
-│   ├── ply-parser.js       # PLY format parser + NaN/Inf sanitizer
-│   ├── splat-parser.js     # SPLAT format parser + PLY converter
-│   └── sog-parser.js       # SOG format parser
-├── scene/                  # Scene files (gitignored, not tracked)
-├── asset/
-│   ├── display/             # Images + gifs used by index.html / README
-│   │   ├── logo.png
-│   │   ├── mt_mcwf_logo.jpg
-│   │   ├── demo_flight.gif
-│   │   ├── demo_field.gif
-│   │   ├── demo_nanjing.gif
-│   │   ├── demo_teaser.jpg
-│   │   └── demo_teaser2.jpg
-│   ├── gate-paths/          # Per-scene JSON path records (gitignored via inner .gitignore)
-│   └── music/               # Audio assets (engine sound + BGM tracks)
-│       ├── fpv_loop.wav       # Looped FPV engine audio (pre-processed)
-│       ├── init/              # BGM playlist for loading / filtering / placement
-│       │   ├── initializ.flac
-│       │   └── manifest.json  # Auto-regenerable fallback for static hosts
-│       └── flight/            # BGM playlist shuffled during flight
-│           ├── playing1.flac
-│           ├── playing2.flac
-│           └── manifest.json  # Drop more tracks here — nothing else to edit
-├── LICENSE                 # Apache 2.0
-└── NOTICE                  # Third-party attributions
+│   ├── main.rs             # CLI, plugin wiring, window/app setup
+│   ├── app_state.rs        # AppState / GameMode / WorldUp + SceneConfig
+│   ├── splat_plugin.rs     # Bevy ↔ web-splat bridge (PLY load, GPU upload, render node)
+│   ├── menu.rs / menu_ui.rs        # mode / scene / loading / exit screens
+│   ├── placement.rs / placement_ui.rs  # orbit camera, spawn/heading editor
+│   ├── flight.rs           # players, keyboard/HID → physics → camera, race state machine
+│   ├── drone.rs            # quaternion physics + FPV/stabilized control laws + PID
+│   ├── collision.rs        # octree spatial index + collision response
+│   ├── gates.rs / spline.rs        # gate course logic + closed Catmull-Rom spline
+│   ├── gate_plugin.rs / gate_editor.rs  # 3D gate frames + top-down path editor
+│   ├── input.rs / input_plugin.rs  # HID RC-transmitter reader + Controller
+│   ├── hud.rs              # flight HUD / OSD (egui)
+│   ├── settings_ui.rs      # in-flight settings panel (egui)
+│   └── persistence.rs      # JSON config under ~/.config/mindcloud-fly/
+├── assets/
+│   └── audio/              # engine loop + BGM (OGG)
+└── web-splat/              # vendored Gaussian-splat renderer (KeKsBoTer/web-splat)
+setup_udev.sh               # one-time HID device permissions (Linux)
+asset/display/              # logo + demo media used by this README
+scene/                      # your scene files (gitignored)
 ```
 
 ## Dependencies
 
-| Library | Version | License | Usage |
-|---------|---------|---------|-------|
-| [PlayCanvas](https://github.com/playcanvas/engine) | 2.17.2 | MIT | 3D engine, GSplat rendering |
-| [JSZip](https://github.com/Stuk/jszip) | 3.10.1 | MIT | SOG file decompression |
-
-Both loaded via CDN — no build step or `npm install` required.
-
-## Requirements
-
-- Modern browser with WebGL2 (Chrome, Edge, Firefox)
-- Python 3 with `python3-websockets` and `python3-hid` (for WebHID bridge)
-- A `.ply`, `.splat`, or `.sog` 3DGS file
-- (Optional) RC transmitter via USB for hardware-in-the-loop control
+| Crate | Purpose |
+|-------|---------|
+| [`bevy`](https://bevyengine.org) 0.18 | ECS, PBR rendering, windowing, audio |
+| [`web_splats`](native-bevy/web-splat) (vendored) | Gaussian-splat rendering (GPU radix sort + rasterize) |
+| [`bevy_egui`](https://github.com/vladbat00/bevy_egui) 0.39 | Menus / HUD / settings UI |
+| `wgpu` 27 | GPU backend (shared by Bevy + web-splat) |
+| `hidapi` | RC-transmitter input |
+| `clap`, `serde`, `serde_json`, `bytemuck`, `cgmath`, `pollster` | CLI / serialization / math utilities |
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Copyright 2026 Manifold Tech Ltd.
