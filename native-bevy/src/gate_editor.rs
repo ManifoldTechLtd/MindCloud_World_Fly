@@ -66,19 +66,23 @@ fn close_editor(mut editor: ResMut<GateEditor>) {
 /// matching the 3D orbit view (a top-down `compute_orbit_camera` for Z-up has screen-right=+X,
 /// screen-down=-Y). Without the negation the editor was vertically flipped — the reported "仰视图".
 ///
-/// COLMAP (Y-down): plane = XZ, height = +Y, kept as `(x, z)` to match the JS XZ tool the users
-/// already validate against (its `worldToCanvas(x, z)` maps +X->right, +Z->down).
+/// COLMAP (Y-down): plane = XZ. Height is `h = -Y` (altitude): `+Y` is gravity/down, so the world
+/// up-axis is `-Y` and `h` must be `-Y` for Z/X (lower/raise) and the height readout to move gates UP
+/// toward the sky — using `+Y` inverted them. The `b` axis is also NEGATED (`b = -Z`) for the same
+/// reason as Z-up: the up-axis is -Y, so a top-down view looks DOWN along +Y, and a non-mirrored
+/// top-down projection needs `b = -Z` (`right=+X, up=+Z` → `X×Z = -Y = -forward`). Without it the map
+/// was a mirrored bottom-up projection — the reported "仰视图" — the same flip already fixed for Z-up.
 fn to_plane(p: Vec3, wu: WorldUp) -> (f32, f32, f32) {
     match wu {
         WorldUp::Zup => (p.x, -p.y, p.z),
-        WorldUp::Colmap => (p.x, p.z, p.y),
+        WorldUp::Colmap => (p.x, -p.z, -p.y),
     }
 }
 
 fn from_plane(a: f32, b: f32, h: f32, wu: WorldUp) -> Vec3 {
     match wu {
         WorldUp::Zup => Vec3::new(a, -b, h),
-        WorldUp::Colmap => Vec3::new(a, h, b),
+        WorldUp::Colmap => Vec3::new(a, -h, -b),
     }
 }
 

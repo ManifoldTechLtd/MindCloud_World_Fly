@@ -2,11 +2,15 @@
 //!
 //! Builds the course from the scene's saved gate path (or a demo ring when none exists), spawns a
 //! square-frame mesh per gate oriented along the Catmull-Rom travel direction, and each frame:
-//! recolours by state (start = white, next = yellow + pulse, others = cyan) and toggles visibility.
-//! `G` shows/hides the whole course. Pass detection + lap timing land in a later slice (race).
+//! recolours by state (start gate = black/white checker, next = green + pulse, others = blue) and,
+//! while flying, shows only the next gate + the two after it. `G` shows/hides the whole course.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
+use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use std::path::Path;
 
 use crate::app_state::{AppState, CurrentSceneConfig, GameMode, WorldUp};
@@ -16,8 +20,10 @@ use crate::persistence;
 use crate::scene::SceneEntity;
 use crate::splat_plugin::SplatScene;
 
-/// How many gates ahead of `next` stay lit (matches native `HORIZON`). Applied only while flying.
-const HORIZON: usize = 5;
+/// How many gates are shown while flying: the next gate + the two after it (3 total). Single-player
+/// (lap mode) wraps around to preview the next lap; linear (dual) races don't wrap and hide every
+/// gate once finished. Placement always shows the whole course.
+const GATE_WINDOW: usize = 3;
 
 /// The active race course (pure logic), with **one progress tracker per player**. Every entry
 /// shares identical geometry (gates / size / world-up / visibility, all built from the same control
@@ -102,6 +108,7 @@ fn ensure_gates_built(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     existing: Option<Res<RaceCourse>>,
     config: Option<Res<CurrentSceneConfig>>,
     splat: Res<SplatScene>,
@@ -159,7 +166,7 @@ fn ensure_gates_built(
         GameMode::SplitScreen => 2,
     };
     let race = RaceCourse { players: vec![course; n_players] };
-    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &race);
+    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &mut images, &race);
     commands.insert_resource(race);
     info!(
         "[Gates] built course: {} gates x {} player(s) ({}); press G to toggle",
@@ -205,6 +212,7 @@ fn respawn_gate_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut dirty: ResMut<GateVisualsDirty>,
     course: Option<Res<RaceCourse>>,
     roots: Query<Entity, With<GateRoot>>,
@@ -219,7 +227,7 @@ fn respawn_gate_visuals(
     for e in &roots {
         commands.entity(e).despawn();
     }
-    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &course);
+    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &mut images, &course);
     info!("[Gates] respawned {} gate frames after edit", course.shared().gates.len());
 }
 
@@ -330,28 +338,40 @@ fn update_gate_appearance(
         if n == 0 {
             continue;
         }
-        let dist = (gv.index + n - c.next_gate_idx) % n;
-        let in_horizon = !flying || dist < HORIZON;
-        *vis = if c.visible && in_horizon {
+        // --- Visibility: placement shows the whole course (overview/editing); flight shows only the
+        // next gate + the two after it (`GATE_WINDOW`). Single-player (lap) wraps around to preview
+        // the next lap; linear (dual) races don't wrap and hide every gate once finished.
+        let in_window = if !flying {
+            true
+        } else if c.linear {
+            let d = gv.index as i32 - c.next_gate_idx as i32;
+            c.finished_at.is_none() && (0..GATE_WINDOW as i32).contains(&d)
+        } else {
+            (gv.index + n - c.next_gate_idx) % n < GATE_WINDOW
+        };
+        *vis = if c.visible && in_window {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
 
-        // Emissive colour (unlit material): start = white, next = yellow, others = cyan. Scaled > 1
-        // so the frames punch through bright 3DGS backgrounds.
-        let col = if gv.index == 0 {
-            LinearRgba::rgb(2.0, 2.0, 2.0)
-        } else if gv.index == c.next_gate_idx {
-            LinearRgba::rgb(2.2, 1.85, 0.0)
-        } else {
-            LinearRgba::rgb(0.0, 1.5, 2.0)
-        };
-        if let Some(m) = materials.get_mut(&gv.material) {
-            m.emissive = col;
+        // --- Colour: set `base_color` (unlit materials ignore `emissive` — that's why the old
+        // emissive-only scheme rendered black). Gate 0 keeps its checker-flag texture (set at spawn).
+        // The next gate is green while flying (unless it IS the start gate); every other gate is blue.
+        let is_next = flying && gv.index == c.next_gate_idx;
+        if gv.index != 0 {
+            let col = if is_next {
+                Color::srgb(0.1, 0.9, 0.2) // green — fly here next
+            } else {
+                Color::srgb(0.0, 0.45, 1.0) // blue — upcoming
+            };
+            if let Some(m) = materials.get_mut(&gv.material) {
+                m.base_color = col;
+            }
         }
 
-        tf.scale = if gv.index == c.next_gate_idx {
+        // The next gate pulses (the start gate pulses too — it just stays checker, not green).
+        tf.scale = if is_next {
             Vec3::splat(c.pulse_scale())
         } else {
             Vec3::ONE
@@ -380,14 +400,20 @@ fn spawn_gate_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
     course: &RaceCourse,
 ) {
     let geom = course.shared();
     let size = geom.gate_size;
     let t = (size * 0.10).max(0.06);
     let half = size * 0.5;
-    let h_bar = meshes.add(Cuboid::new(size + t, t, t));
-    let v_bar = meshes.add(Cuboid::new(t, size - t, t));
+    // Faced box meshes: per-face UVs (so the checker squares stay uniform on EVERY face, including
+    // the thin sides) + per-face vertex colours (front/back bright, sides dim) baked in for a 3D
+    // "directional-lighting" cue that survives recolouring. Local +Z = travel = the front/back axis.
+    let h_bar = meshes.add(faced_box_mesh(size + t, t, t));
+    let v_bar = meshes.add(faced_box_mesh(t, size - t, t));
+    // Shared black/white checker texture for every player's start gate (gate 0).
+    let checker = images.add(make_checker_image());
 
     let root = commands
         .spawn((GateRoot, SceneEntity, Transform::default(), Visibility::default()))
@@ -399,11 +425,25 @@ fn spawn_gate_visuals(
     for player in 0..course.players.len() {
         let layer = RenderLayers::layer(player + 1);
         for (i, gate) in geom.gates.iter().enumerate() {
-            let material = materials.add(StandardMaterial {
-                base_color: Color::BLACK,
-                emissive: LinearRgba::rgb(0.0, 1.5, 2.0),
-                unlit: true,
-                ..default()
+            // Gate 0 (start/finish) wears a black/white checker flag; the rest start blue and are
+            // recoloured per-frame by `update_gate_appearance`. All unlit so the colour/texture shows
+            // directly (a lit material would be black with no scene lights). The bar mesh carries
+            // per-face vertex colours (front/back bright, sides dim), which the unlit material
+            // multiplies into base_color/texture — so both the solid colour AND the checker get the
+            // same 3D face shading, and recolouring (which only changes base_color) preserves it.
+            let material = materials.add(if i == 0 {
+                StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(checker.clone()),
+                    unlit: true,
+                    ..default()
+                }
+            } else {
+                StandardMaterial {
+                    base_color: Color::srgb(0.0, 0.45, 1.0),
+                    unlit: true,
+                    ..default()
+                }
             });
             let pos = Vec3::new(gate.pos.x, gate.pos.y, gate.pos.z);
             let rot = gate_basis_quat(gate.travel_dir, geom.world_up);
@@ -443,6 +483,77 @@ fn spawn_gate_visuals(
             });
         }
     }
+}
+
+/// Build the 2×2 black/white checker texture worn by every start gate (gate 0), mirroring JS
+/// `getCheckerTexture`. REPEAT + NEAREST keeps the squares crisp; `faced_box_mesh` bakes per-face UVs
+/// scaled to world size so this 2×2 tiles into uniform squares on every bar face (sides included).
+fn make_checker_image() -> Image {
+    // One pixel per square: (white, black / black, white).
+    let data = vec![
+        255, 255, 255, 255, 0, 0, 0, 255, // row 0
+        0, 0, 0, 255, 255, 255, 255, 255, // row 1
+    ];
+    let mut image = Image::new(
+        Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // NEAREST (crisp squares) + REPEAT (so the per-face UVs > 1 from `faced_box_mesh` wrap/tile).
+    let mut desc = ImageSamplerDescriptor::nearest();
+    desc.address_mode_u = ImageAddressMode::Repeat;
+    desc.address_mode_v = ImageAddressMode::Repeat;
+    desc.address_mode_w = ImageAddressMode::Repeat;
+    image.sampler = ImageSampler::Descriptor(desc);
+    image
+}
+
+/// Build a flat-shaded box mesh (dims `sx,sy,sz`, centred at origin) for one gate bar, carrying:
+/// - **per-face UVs** scaled to each face's world size, so a tiled checker renders UNIFORM squares
+///   on *every* face including the thin sides (a single `uv_transform` could only make ONE face's
+///   squares square — the others stretched into stripes), and
+/// - **per-face vertex colours**: the ±Z faces (the gate front/back the pilot sees) full-bright, all
+///   other faces dimmed. The unlit material multiplies these in, baking a directional-lighting cue
+///   into both solid-colour and checker gates that survives per-frame recolouring (mirrors JS
+///   `FACE_BRIGHTNESS`: front/back 1.0, outer/inner/caps 0.4).
+fn faced_box_mesh(sx: f32, sy: f32, sz: f32) -> Mesh {
+    const SQUARE: f32 = 0.11; // world size of one checker square (gate-0 only; ignored when untextured)
+    const FRONT: f32 = 1.0; // ±Z brightness (gate front/back)
+    const SIDE: f32 = 0.5; // every other face (outer/inner rim + end caps)
+    let (hx, hy, hz) = (sx * 0.5, sy * 0.5, sz * 0.5);
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(24);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(24);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(24);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(24);
+    let mut indices: Vec<u32> = Vec::with_capacity(36);
+    // Append one outward-facing quad (CCW p0→p1→p2→p3). `u_size`/`v_size` are the face's world dims
+    // along p0→p1 and p1→p2; UVs span 0..size/(2*SQUARE) (×2 because the checker texture is 2×2).
+    let mut add = |p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3], n: [f32; 3], u_size: f32, v_size: f32, b: f32| {
+        let base = positions.len() as u32;
+        let (u, v) = (u_size / (2.0 * SQUARE), v_size / (2.0 * SQUARE));
+        positions.extend_from_slice(&[p0, p1, p2, p3]);
+        normals.extend_from_slice(&[n; 4]);
+        uvs.extend_from_slice(&[[0.0, 0.0], [u, 0.0], [u, v], [0.0, v]]);
+        colors.extend_from_slice(&[[b, b, b, 1.0]; 4]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+    // Front / back (±Z): bright. U along X, V along Y.
+    add([-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz], [0.0, 0.0, 1.0], sx, sy, FRONT);
+    add([hx, -hy, -hz], [-hx, -hy, -hz], [-hx, hy, -hz], [hx, hy, -hz], [0.0, 0.0, -1.0], sx, sy, FRONT);
+    // Inner / outer rim (±X): dim. U along Z, V along Y.
+    add([hx, -hy, hz], [hx, -hy, -hz], [hx, hy, -hz], [hx, hy, hz], [1.0, 0.0, 0.0], sz, sy, SIDE);
+    add([-hx, -hy, -hz], [-hx, -hy, hz], [-hx, hy, hz], [-hx, hy, -hz], [-1.0, 0.0, 0.0], sz, sy, SIDE);
+    // Rim / caps (±Y): dim. U along X, V along Z.
+    add([-hx, hy, hz], [hx, hy, hz], [hx, hy, -hz], [-hx, hy, -hz], [0.0, 1.0, 0.0], sx, sz, SIDE);
+    add([-hx, -hy, -hz], [hx, -hy, -hz], [hx, -hy, hz], [-hx, -hy, hz], [0.0, -1.0, 0.0], sx, sz, SIDE);
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices))
 }
 
 /// A default closed loop of 6 gates ringing the spawn on the world-up horizontal plane (radius m),

@@ -3,10 +3,12 @@
 //! verbatim from native `placement.rs` (`compute_orbit_camera` / `update_spawn`); the resulting
 //! web-splat camera is converted to a Bevy transform with the same `* flip_x` the splat node applies.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use cgmath::{InnerSpace, Rotation};
@@ -21,8 +23,8 @@ use crate::scene::{SceneEntity, SplitCamera};
 use crate::splat_plugin::{self, SplatCamera};
 use crate::SceneInput;
 
-/// Marks the placement spawn marker (bright sphere + heading arrow) so `placement_update` can keep
-/// it on the configured spawn point + heading. Despawned by `flight::setup_flight`.
+/// Marks the placement spawn marker (a flat dark-yellow arrow) so `placement_update` can keep it on
+/// the configured spawn point + heading. Despawned by `flight::setup_flight`.
 #[derive(Component)]
 pub(crate) struct SpawnMarker;
 
@@ -47,7 +49,7 @@ struct OrbitState {
 
 impl Default for OrbitState {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: -20.0, dist: 18.0 }
+        Self { yaw: 0.0, pitch: -20.0, dist: 8.0 }
     }
 }
 
@@ -147,42 +149,26 @@ fn setup_scene(
         SceneEntity,
     ));
 
-    // --- Spawn marker: a bright blue ball + heading arrow at the configured spawn point. ---
-    // `placement_update` moves/rotates this each frame to follow `spawn` + `heading`; the arrow is
-    // modeled along +Y and the parent rotation aims it along the heading (= the orbit view
-    // direction), so the marker shows where the drone starts and which way it faces.
-    let marker_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.1, 0.5, 1.0),
-        emissive: LinearRgba::rgb(0.1, 0.9, 3.0),
+    // --- Spawn marker: a flat, dark-yellow isosceles triangular prism (arrow) lying on the ground
+    // at the spawn point, pointing along the heading. `placement_update` moves/rotates it each frame;
+    // the prism is modeled in local XY (apex +Y, flat through local Z) and the parent rotation maps
+    // local +Y → heading and +Z → world up, so it stays flat and points where the drone will face.
+    // Per-face vertex colours (brighter top than sides) give it a 3D look; the material is unlit (to
+    // punch through the bright splat) and double-sided so the underside shows when orbiting below.
+    let arrow_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.95, 0.0), // dark / muted yellow
         unlit: true,
+        cull_mode: None,
         ..default()
     });
-    commands
-        .spawn((
-            Transform::from_translation(focus),
-            Visibility::default(),
-            SpawnMarker,
-            SceneEntity,
-        ))
-        .with_children(|p| {
-            // Ball at the spawn point.
-            p.spawn((
-                Mesh3d(meshes.add(Sphere::new(1.0))),
-                MeshMaterial3d(marker_mat.clone()),
-                Transform::default(),
-            ));
-            // Arrow shaft + cone head along +Y (aimed by the parent rotation).
-            p.spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.45, 5.0, 0.45))),
-                MeshMaterial3d(marker_mat.clone()),
-                Transform::from_xyz(0.0, 2.5, 0.0),
-            ));
-            p.spawn((
-                Mesh3d(meshes.add(Cone { radius: 1.1, height: 2.2 })),
-                MeshMaterial3d(marker_mat),
-                Transform::from_xyz(0.0, 6.1, 0.0),
-            ));
-        });
+    commands.spawn((
+        Mesh3d(meshes.add(arrow_prism_mesh(1.4, 0.4, 0.12))), // length (长), width (宽), height (高)
+        MeshMaterial3d(arrow_mat),
+        Transform::from_translation(focus),
+        Visibility::default(),
+        SpawnMarker,
+        SceneEntity,
+    ));
 
     // --- Camera(s): each renders the full scene (splat + PBR meshes). In split mode the two stacked
     // cameras share the window target and `scene::set_split_viewports` assigns their viewport rects.
@@ -299,17 +285,19 @@ fn placement_update(
     if !ui_focus.wants_keyboard && !menu.show_exit && !editing {
         update_spawn(&mut config.0, &orbit, time.delta_secs(), &keys);
     }
-    // Keep the marker (position + heading) on the spawn point. `fwd_dir` MUST equal the orbit
-    // camera's horizontal look direction (= the drone spawn forward) so the arrow rotates WITH the
-    // camera/heading. Zup: compute_orbit_camera's look_dir is (sin h, cos h, 0) (CW from above);
-    // the earlier (-sin h, ...) spun the arrow CCW — opposite the camera. Colmap already matches.
+    // Keep the marker (position + heading) on the spawn point. Build an orthonormal basis that maps
+    // local +Y → the horizontal heading (= the drone spawn forward, matching the orbit camera's look
+    // direction) and local +Z → world up, so the flat triangular prism lies on the ground pointing
+    // where the drone will face. Zup heading vector is (sin h, cos h, 0) (CW from above), matching
+    // compute_orbit_camera's look_dir; Colmap up is -Y (gravity +Y).
     let spawn = Vec3::from(config.0.spawn);
     let h = config.0.heading_deg.to_radians();
-    let fwd_dir = match config.0.world_up {
-        WorldUp::Zup => Vec3::new(h.sin(), h.cos(), 0.0),
-        WorldUp::Colmap => Vec3::new(h.cos(), 0.0, h.sin()),
+    let (up, fwd) = match config.0.world_up {
+        WorldUp::Zup => (Vec3::Z, Vec3::new(h.sin(), h.cos(), 0.0)),
+        WorldUp::Colmap => (-Vec3::Y, Vec3::new(h.cos(), 0.0, h.sin())),
     };
-    let rot = Quat::from_rotation_arc(Vec3::Y, fwd_dir);
+    let right = fwd.cross(up).normalize();
+    let rot = Quat::from_mat3(&Mat3::from_cols(right, fwd, up));
     for mut t in &mut markers {
         t.translation = spawn;
         t.rotation = rot;
@@ -385,6 +373,58 @@ fn orbit_camera_transform(config: &SceneConfig, orbit: &OrbitState) -> Transform
         rotation: Quat::from_xyzw(q.v.x, q.v.y, q.v.z, q.s),
         scale: Vec3::ONE,
     }
+}
+
+/// Build the spawn-arrow mesh: a flat isosceles triangular prism modeled in local XY with the apex
+/// toward +Y and flat through local Z, its centroid at the origin (so it stays centred on the spawn
+/// point). `length` = apex→base distance (长), `width` = base-edge width (宽), `height` = prism
+/// thickness (高) — all independent. Carries per-face vertex colours used as brightness multipliers —
+/// the top cap full-bright, the sides dimmer, the underside dimmest — so the unlit dark-yellow
+/// material reads as a 3D arrow. The material is double-sided, so triangle winding here is cosmetic.
+fn arrow_prism_mesh(length: f32, width: f32, height: f32) -> Mesh {
+    // Centroid of a triangle sits 1/3 of the way from base to apex, so place the apex at +2/3·length
+    // and the base edge at -1/3·length to keep the centroid (hence the arrow) on the spawn point.
+    let (ay, by) = (length * 2.0 / 3.0, -length / 3.0);
+    let (hw, hz) = (width * 0.5, height * 0.5);
+    // Triangle corners on the top (+Z) and bottom (-Z) caps.
+    let apex_t = [0.0, ay, hz];
+    let bl_t = [-hw, by, hz];
+    let br_t = [hw, by, hz];
+    let apex_b = [0.0, ay, -hz];
+    let bl_b = [-hw, by, -hz];
+    let br_b = [hw, by, -hz];
+    const TOP: f32 = 1.0;
+    const SIDE: f32 = 0.6;
+    const BOTTOM: f32 = 0.45;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // Add a polygon as a triangle fan (handles the 3-vert caps and 4-vert side quads), with one flat
+    // normal + brightness `b` baked into every vertex colour.
+    let mut add = |verts: &[[f32; 3]], n: [f32; 3], b: f32| {
+        let base = positions.len() as u32;
+        for &p in verts {
+            positions.push(p);
+            normals.push(n);
+            colors.push([b, b, b, 1.0]);
+        }
+        for i in 1..(verts.len() as u32 - 1) {
+            indices.extend_from_slice(&[base, base + i, base + i + 1]);
+        }
+    };
+    // Top + bottom caps.
+    add(&[apex_t, bl_t, br_t], [0.0, 0.0, 1.0], TOP);
+    add(&[apex_b, br_b, bl_b], [0.0, 0.0, -1.0], BOTTOM);
+    // Three side faces (outward normals approximate; cosmetic only under the double-sided material).
+    add(&[apex_t, bl_t, bl_b, apex_b], [-0.866, 0.5, 0.0], SIDE);
+    add(&[bl_t, br_t, br_b, bl_b], [0.0, -1.0, 0.0], SIDE);
+    add(&[br_t, apex_t, apex_b, br_b], [0.866, 0.5, 0.0], SIDE);
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices))
 }
 
 /// Placement overlay: edit spawn / heading / world-up, then Start Flight (Enter) or Back (Esc).
