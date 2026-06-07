@@ -315,10 +315,13 @@ fn update_spawn(config: &mut SceneConfig, orbit: &OrbitState, dt: f32, keys: &Bu
     let (sin_y, cos_y) = (yaw.sin(), yaw.cos());
     match config.world_up {
         WorldUp::Zup => {
-            if keys.pressed(KeyCode::KeyW) { config.spawn[0] -= sin_y * s; config.spawn[1] += cos_y * s; }
-            if keys.pressed(KeyCode::KeyS) { config.spawn[0] += sin_y * s; config.spawn[1] -= cos_y * s; }
-            if keys.pressed(KeyCode::KeyA) { config.spawn[0] -= cos_y * s; config.spawn[1] -= sin_y * s; }
-            if keys.pressed(KeyCode::KeyD) { config.spawn[0] += cos_y * s; config.spawn[1] += sin_y * s; }
+            // Forward (W) = camera horizontal look dir (sin y, cos y); Right (D) = forward × up(+Z)
+            // = (cos y, -sin y). The old code negated the sin terms (mirroring the yaw), so W moved
+            // backwards and A/D were swapped at non-zero yaw. (COLMAP below was already correct.)
+            if keys.pressed(KeyCode::KeyW) { config.spawn[0] += sin_y * s; config.spawn[1] += cos_y * s; }
+            if keys.pressed(KeyCode::KeyS) { config.spawn[0] -= sin_y * s; config.spawn[1] -= cos_y * s; }
+            if keys.pressed(KeyCode::KeyA) { config.spawn[0] -= cos_y * s; config.spawn[1] += sin_y * s; }
+            if keys.pressed(KeyCode::KeyD) { config.spawn[0] += cos_y * s; config.spawn[1] -= sin_y * s; }
             if keys.pressed(KeyCode::KeyE) { config.spawn[2] += s; }
             if keys.pressed(KeyCode::KeyQ) { config.spawn[2] -= s; }
         }
@@ -484,4 +487,67 @@ fn placement_overlay_system(
         PlacementAction::EditGates | PlacementAction::None => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod spawn_move_tests {
+    use super::*;
+
+    fn cfg(world_up: WorldUp) -> SceneConfig {
+        SceneConfig { world_up, spawn: [1.0, 2.0, 3.0], heading_deg: 0.0 }
+    }
+
+    /// Horizontal (ground-plane) component of the orbit camera's look direction.
+    fn cam_forward_horiz(config: &SceneConfig, orbit: &OrbitState) -> Vec3 {
+        let (cam_pos, _q) = compute_orbit_camera(config, orbit);
+        let look = Vec3::new(
+            config.spawn[0] - cam_pos.x,
+            config.spawn[1] - cam_pos.y,
+            config.spawn[2] - cam_pos.z,
+        );
+        match config.world_up {
+            WorldUp::Zup => Vec3::new(look.x, look.y, 0.0),
+            WorldUp::Colmap => Vec3::new(look.x, 0.0, look.z),
+        }
+        .normalize()
+    }
+
+    /// Normalised spawn displacement after holding `key` for one 60 FPS tick at the given yaw.
+    fn moved(world_up: WorldUp, yaw: f32, key: KeyCode) -> Vec3 {
+        let mut c = cfg(world_up);
+        let before = Vec3::from(c.spawn);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(key);
+        update_spawn(&mut c, &OrbitState { yaw, pitch: -20.0, dist: 8.0 }, 1.0 / 60.0, &keys);
+        (Vec3::from(c.spawn) - before).normalize()
+    }
+
+    /// W/S/A/D must move the spawn along the orbit camera's basis (kept in sync with the spawn
+    /// heading) in BOTH world-ups. The Z-up branch used to mirror the yaw, so W went backwards (and
+    /// A/D swapped) at non-zero yaw; COLMAP was already correct.
+    #[test]
+    fn wasd_moves_relative_to_camera_in_both_world_ups() {
+        for &world_up in &[WorldUp::Zup, WorldUp::Colmap] {
+            let up = match world_up {
+                WorldUp::Zup => Vec3::Z,
+                WorldUp::Colmap => -Vec3::Y,
+            };
+            for &yaw in &[0.0_f32, 30.0, 90.0, 135.0, 200.0, -60.0] {
+                let fwd = cam_forward_horiz(&cfg(world_up), &OrbitState { yaw, pitch: -20.0, dist: 8.0 });
+                let right = fwd.cross(up).normalize();
+                for (key, expected, name) in [
+                    (KeyCode::KeyW, fwd, "W"),
+                    (KeyCode::KeyS, -fwd, "S"),
+                    (KeyCode::KeyD, right, "D"),
+                    (KeyCode::KeyA, -right, "A"),
+                ] {
+                    let dot = moved(world_up, yaw, key).dot(expected);
+                    assert!(
+                        dot > 0.999,
+                        "{world_up:?} yaw {yaw}: {name} should move along {expected:?} (dot={dot})"
+                    );
+                }
+            }
+        }
+    }
 }
