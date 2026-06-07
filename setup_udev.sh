@@ -39,4 +39,4 @@ udevadm control --reload-rules
 udevadm trigger
 
 echo ""
-echo "Done. Reconnect your RC transmitter and run launch.sh."
+echo "Done. Reconnect your RC transmitter, then run the simulator (cd native-bevy && cargo run --release)."
