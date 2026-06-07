@@ -278,6 +278,14 @@ impl Drone {
         self.reset_to_spawn();
     }
 
+    /// Pin position + linear velocity to the spawn point while leaving attitude (orientation /
+    /// angular rates) untouched — used during the race countdown so a pilot can aim their drone in
+    /// place but cannot leave the start line until GO.
+    pub fn lock_position(&mut self) {
+        self.x = self.spawn_x; self.y = self.spawn_y; self.z = self.spawn_z;
+        self.vx = 0.0; self.vy = 0.0; self.vz = 0.0;
+    }
+
     /// Copy the *tunable settings* (not live flight state) from `src` into `self`. Used by the
     /// split-screen settings panel to keep every player's drone on one shared config. The field set
     /// mirrors `persistence::DroneSettings` plus `flight_mode` (the panel's upper sections).

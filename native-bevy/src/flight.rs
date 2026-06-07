@@ -36,6 +36,34 @@ pub struct SettingsOpen(pub bool);
 #[derive(Resource, Default)]
 pub struct SettingsPlayer(pub usize);
 
+/// Split-screen race phase. Single-player skips straight to `Racing` (free flight, no countdown).
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub enum RaceState {
+    /// Drones pinned at spawn; waiting for `P` to start the countdown.
+    Ready,
+    /// 3-2-1 countdown; drones still pinned (attitude adjustable). `remaining` counts down to 0.
+    Countdown { remaining: f32 },
+    /// Race underway; while `go_flash` > 0 the brief "GO!" banner stays up.
+    Racing { go_flash: f32 },
+}
+
+impl Default for RaceState {
+    fn default() -> Self {
+        RaceState::Racing { go_flash: 0.0 }
+    }
+}
+
+impl RaceState {
+    /// Drones are pinned at spawn during `Ready` + `Countdown` (attitude still adjustable).
+    fn is_locked(self) -> bool {
+        matches!(self, RaceState::Ready | RaceState::Countdown { .. })
+    }
+}
+
+/// Race countdown length (seconds) and the post-GO banner flash duration.
+const COUNTDOWN_SECS: f32 = 3.0;
+const GO_FLASH_SECS: f32 = 0.9;
+
 /// Wires the flight systems: drone setup on entering `Playing`, then input → physics → camera each
 /// frame while playing.
 pub struct FlightPlugin;
@@ -44,18 +72,19 @@ impl Plugin for FlightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsOpen>();
         app.init_resource::<SettingsPlayer>();
+        app.init_resource::<RaceState>();
         app.init_resource::<Players>();
         app.add_systems(OnEnter(AppState::Playing), setup_flight);
         app.add_systems(
             Update,
-            (settings_toggle_system, drone_input_system, drone_camera_system)
+            (settings_toggle_system, race_system, drone_input_system, drone_camera_system)
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         );
-        // HUD + settings panel + pause curtain draw in the egui pass while flying.
+        // HUD + countdown overlay + settings panel + pause curtain draw in the egui pass.
         app.add_systems(
             EguiPrimaryContextPass,
-            (hud_system, settings_ui_system, pause_curtain_system)
+            (hud_system, race_overlay_system, settings_ui_system, pause_curtain_system)
                 .run_if(in_state(AppState::Playing)),
         );
     }
@@ -115,6 +144,12 @@ fn setup_flight(
     );
     commands.insert_resource(Players(players));
     commands.insert_resource(SettingsOpen(false));
+    // Split-screen is a race: drones stay pinned at spawn until P starts the 3-2-1 countdown.
+    // Single-player is free flight (no countdown / no lock).
+    commands.insert_resource(match *mode {
+        GameMode::SplitScreen => RaceState::Ready,
+        GameMode::SinglePlayer => RaceState::Racing { go_flash: 0.0 },
+    });
     // The placement spawn marker is not shown during flight.
     for e in &markers {
         commands.entity(e).despawn();
@@ -131,6 +166,7 @@ fn drone_input_system(
     keys_in: Res<ButtonInput<KeyCode>>,
     mut players: ResMut<Players>,
     mut ctrl: Option<ResMut<ControllerRes>>,
+    mut race: ResMut<RaceState>,
     settings_open: Res<SettingsOpen>,
     menu: Res<crate::menu::MenuState>,
     splat: Res<SplatScene>,
@@ -146,6 +182,8 @@ fn drone_input_system(
     }
     let dt = time.delta_secs();
     let octree = splat.collision_octree.as_ref();
+    // During Ready/Countdown the drones are pinned at spawn (attitude still adjustable).
+    let locked = race.is_locked();
 
     // --- Player 1: keyboard (WASD/arrows + Space/R/M) + optional HID controller index 0 ---
     {
@@ -170,7 +208,7 @@ fn drone_input_system(
         }
         let kbd = p.keys.to_input(p.armed);
         let c = ctrl.as_deref_mut().map(|c| &mut c.0[0]);
-        drive_player(p, c, kbd, "P1", dt, octree);
+        drive_player(p, c, kbd, "P1", dt, octree, locked);
     }
 
     // --- Player 2 (split-screen only): keyboard IJKL/TGFH + Enter/N, or HID index 1 ---
@@ -198,7 +236,7 @@ fn drone_input_system(
         }
         let kbd = p.keys.to_input(p.armed);
         let c = ctrl.as_deref_mut().map(|c| &mut c.0[1]);
-        drive_player(p, c, kbd, "P2", dt, octree);
+        drive_player(p, c, kbd, "P2", dt, octree, locked);
     }
 
     // Master reset: R (keyboard) or P1's controller reset switch returns EVERY drone to spawn — one
@@ -208,13 +246,18 @@ fn drone_input_system(
         for p in players.0.iter_mut() {
             p.drone.reset_to_spawn();
         }
+        // Split-screen: a reset returns to the start line, ready for a fresh countdown.
+        if players.0.len() > 1 {
+            *race = RaceState::Ready;
+        }
         info!("[Reset] all drones reset to spawn");
     }
 }
 
 /// Drive one player's drone for this frame: a connected HID controller (`ctrl`) supplies sticks +
-/// arm/mode; otherwise the keyboard fallback `kbd` is used. Then steps physics + collision. (Reset
-/// is a master action handled by `drone_input_system`, not per-player.)
+/// arm/mode; otherwise the keyboard fallback `kbd` is used. Steps physics, then either pins the
+/// drone at spawn (`locked`, during the countdown) or runs collision. (Reset is a master action
+/// handled by `drone_input_system`, not per-player.)
 fn drive_player(
     p: &mut PlayerState,
     ctrl: Option<&mut crate::input::Controller>,
@@ -222,6 +265,7 @@ fn drive_player(
     label: &str,
     dt: f32,
     octree: Option<&crate::collision::Octree>,
+    locked: bool,
 ) {
     let input = match ctrl {
         Some(c) if c.hid_connected => {
@@ -239,7 +283,10 @@ fn drive_player(
         _ => kbd,
     };
     p.drone.update(dt, &input);
-    if let Some(octree) = octree {
+    if locked {
+        // Countdown: hold the drone on the start line; the attitude from `update` is kept.
+        p.drone.lock_position();
+    } else if let Some(octree) = octree {
         check_collision(&mut p.drone, octree);
     }
 }
@@ -353,6 +400,108 @@ fn settings_toggle_system(keys: Res<ButtonInput<KeyCode>>, mut settings_open: Re
     if keys.just_pressed(KeyCode::F1) {
         settings_open.0 = !settings_open.0;
     }
+}
+
+/// `Update` (Playing): drives the split-screen race phase. `P` (while `Ready`) snaps both drones to
+/// the start line and begins the 3-2-1 countdown; the countdown ticks to GO, then a brief banner
+/// flash. Single-player stays in `Racing` (free flight) so `P` is a no-op. Frozen while paused.
+fn race_system(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut race: ResMut<RaceState>,
+    mut players: ResMut<Players>,
+    settings_open: Res<SettingsOpen>,
+    menu: Res<crate::menu::MenuState>,
+) {
+    if settings_open.0 || menu.show_exit {
+        return; // paused: hold the countdown where it is
+    }
+    let dt = time.delta_secs();
+    match *race {
+        RaceState::Ready => {
+            if keys.just_pressed(KeyCode::KeyP) {
+                for p in players.0.iter_mut() {
+                    p.drone.reset_to_spawn();
+                }
+                *race = RaceState::Countdown { remaining: COUNTDOWN_SECS };
+                info!("[Race] countdown started");
+            }
+        }
+        RaceState::Countdown { remaining } => {
+            let next = remaining - dt;
+            if next <= 0.0 {
+                *race = RaceState::Racing { go_flash: GO_FLASH_SECS };
+                info!("[Race] GO!");
+            } else {
+                *race = RaceState::Countdown { remaining: next };
+            }
+        }
+        RaceState::Racing { go_flash } if go_flash > 0.0 => {
+            *race = RaceState::Racing { go_flash: (go_flash - dt).max(0.0) };
+        }
+        RaceState::Racing { .. } => {}
+    }
+}
+
+/// `EguiPrimaryContextPass` (Playing): big centered countdown / GO! banner in each viewport half,
+/// plus a "Press P to start" hint while `Ready`. Nothing draws in single-player (always `Racing`).
+fn race_overlay_system(
+    mut contexts: EguiContexts,
+    race: Res<RaceState>,
+    players: Res<Players>,
+    windows: Query<&Window>,
+) -> Result {
+    if players.0.is_empty() {
+        return Ok(());
+    }
+    // Banner text + style for this frame; bail if there's nothing to show (free-flight Racing).
+    let (text, color, size) = match *race {
+        RaceState::Ready => ("Press  P  to start".to_string(), egui::Color32::WHITE, 30.0),
+        RaceState::Countdown { remaining } => (
+            (remaining.ceil().max(1.0) as i32).to_string(),
+            egui::Color32::from_rgb(255, 215, 70),
+            150.0,
+        ),
+        RaceState::Racing { go_flash } if go_flash > 0.0 => {
+            ("GO!".to_string(), egui::Color32::from_rgb(90, 230, 120), 150.0)
+        }
+        RaceState::Racing { .. } => return Ok(()),
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    let Ok(win) = windows.single() else {
+        return Ok(());
+    };
+    // scale_factor_override(1.0) → egui logical points == physical px == the camera viewports.
+    let (w, h) = (win.width(), win.height());
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("race_overlay"),
+    ));
+    // Split-screen: one banner centered in each half. Single-player would be one centered banner,
+    // but it never leaves free-flight `Racing` so only the split path is reached in practice.
+    if players.0.len() <= 1 {
+        painter.text(
+            egui::pos2(w * 0.5, h * 0.5),
+            egui::Align2::CENTER_CENTER,
+            &text,
+            egui::FontId::proportional(size),
+            color,
+        );
+    } else {
+        let half = h * 0.5;
+        for i in 0..2 {
+            painter.text(
+                egui::pos2(w * 0.5, half * i as f32 + half * 0.5),
+                egui::Align2::CENTER_CENTER,
+                &text,
+                egui::FontId::proportional(size),
+                color,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `EguiPrimaryContextPass` (Playing): draw the settings panel (drone physics/rates/PID) when open.
