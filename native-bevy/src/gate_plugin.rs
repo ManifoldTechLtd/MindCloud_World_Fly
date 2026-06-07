@@ -148,6 +148,9 @@ fn ensure_gates_built(
     };
     course.rebuild(&points, world_up);
     course.visible = true;
+    // Dual (split) races are linear: clock from GO, finish on the last gate. Single-player keeps
+    // lap racing (clock from the first gate-0 crossing, laps loop forever).
+    course.linear = matches!(*mode, GameMode::SplitScreen);
 
     let n = course.gates.len();
     // One independent progress tracker per player (identical geometry, separate pass/lap state).
@@ -246,6 +249,7 @@ fn gate_race_system(
     let now_ms = time.elapsed_secs_f64() * 1000.0;
     let dt = time.delta_secs();
     // Each player's tracker follows their own drone, so timing + gate count are independent.
+    let mut newly_finished: Vec<usize> = Vec::new();
     for (i, c) in course.players.iter_mut().enumerate() {
         let Some(p) = players.0.get(i) else {
             break;
@@ -265,8 +269,23 @@ fn gate_race_system(
                         if is_best { " — NEW BEST" } else { "" }
                     );
                 }
+                GateEvent::Finished { total_ms, is_best } => {
+                    info!(
+                        "[Race][P{}] FINISHED {}{}",
+                        i + 1,
+                        gates::format_lap(total_ms),
+                        if is_best { " — NEW BEST" } else { "" }
+                    );
+                    newly_finished.push(i);
+                }
             }
         }
+    }
+    // Assign finishing places in the order players crossed the final gate (No.1, No.2, …).
+    for i in newly_finished {
+        let rank = course.players.iter().filter(|c| c.finish_rank.is_some()).count() as u8 + 1;
+        course.players[i].finish_rank = Some(rank);
+        info!("[Race][P{}] place No.{}", i + 1, rank);
     }
 }
 

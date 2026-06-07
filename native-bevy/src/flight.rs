@@ -8,6 +8,7 @@ use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 use crate::app_state::{AppState, CurrentSceneConfig, GameMode, WorldUp};
 use crate::drone::{Drone, DroneInput, FlightMode, KeyState};
 use crate::gate_plugin::RaceCourse;
+use crate::gates;
 use crate::hud;
 use crate::input_plugin::{self, ControllerRes, HidConnections, HidDevices};
 use crate::persistence;
@@ -84,7 +85,13 @@ impl Plugin for FlightPlugin {
         // HUD + countdown overlay + settings panel + pause curtain draw in the egui pass.
         app.add_systems(
             EguiPrimaryContextPass,
-            (hud_system, race_overlay_system, settings_ui_system, pause_curtain_system)
+            (
+                hud_system,
+                race_overlay_system,
+                race_finish_overlay_system,
+                settings_ui_system,
+                pause_curtain_system,
+            )
                 .run_if(in_state(AppState::Playing)),
         );
     }
@@ -408,13 +415,15 @@ fn settings_toggle_system(keys: Res<ButtonInput<KeyCode>>, mut settings_open: Re
 }
 
 /// `Update` (Playing): drives the split-screen race phase. `P` (while `Ready`) snaps both drones to
-/// the start line and begins the 3-2-1 countdown; the countdown ticks to GO, then a brief banner
-/// flash. Single-player stays in `Racing` (free flight) so `P` is a no-op. Frozen while paused.
+/// the start line, clears the gate trackers, and begins the 3-2-1 countdown; at GO the linear race
+/// clock starts (per-player) and a brief banner flashes. Single-player stays in `Racing` (free
+/// flight) so `P` is a no-op. Frozen while paused.
 fn race_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut race: ResMut<RaceState>,
     mut players: ResMut<Players>,
+    mut course: Option<ResMut<RaceCourse>>,
     settings_open: Res<SettingsOpen>,
     menu: Res<crate::menu::MenuState>,
 ) {
@@ -428,6 +437,12 @@ fn race_system(
                 for p in players.0.iter_mut() {
                     p.drone.reset_to_spawn();
                 }
+                // Clear any prior finish / progress so the new race starts fresh.
+                if let Some(course) = course.as_mut() {
+                    for c in &mut course.players {
+                        c.reset_lap();
+                    }
+                }
                 *race = RaceState::Countdown { remaining: COUNTDOWN_SECS };
                 info!("[Race] countdown started");
             }
@@ -436,6 +451,13 @@ fn race_system(
             let next = remaining - dt;
             if next <= 0.0 {
                 *race = RaceState::Racing { go_flash: GO_FLASH_SECS };
+                // Linear (dual) race: the clock starts NOW, at GO — not on the first gate.
+                let now_ms = time.elapsed_secs_f64() * 1000.0;
+                if let Some(course) = course.as_mut() {
+                    for c in &mut course.players {
+                        c.start_race_timer(now_ms);
+                    }
+                }
                 info!("[Race] GO!");
             } else {
                 *race = RaceState::Countdown { remaining: next };
@@ -505,6 +527,86 @@ fn race_overlay_system(
                 color,
             );
         }
+    }
+    Ok(())
+}
+
+/// `EguiPrimaryContextPass` (Playing): once a split-screen pilot crosses the final gate (linear
+/// race), cover their viewport half with a translucent black curtain + "FINISH!", their place
+/// (No.1 = gold / No.2 = silver) and time, plus a "press R to reset" hint. The other half stays
+/// clear so that pilot keeps racing. Single-player (lap mode) never finishes → nothing draws.
+fn race_finish_overlay_system(
+    mut contexts: EguiContexts,
+    race: Res<RaceState>,
+    players: Res<Players>,
+    course: Option<Res<RaceCourse>>,
+    windows: Query<&Window>,
+) -> Result {
+    // Only during the race proper (Ready/Countdown have cleared finishes); split-screen only.
+    if !matches!(*race, RaceState::Racing { .. }) || players.0.len() <= 1 {
+        return Ok(());
+    }
+    let Some(course) = course else {
+        return Ok(());
+    };
+    if !course.players.iter().any(|c| c.finish_rank.is_some()) {
+        return Ok(());
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    let Ok(win) = windows.single() else {
+        return Ok(());
+    };
+    let (w, h) = (win.width(), win.height());
+    let half = h * 0.5;
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("race_finish"),
+    ));
+    for (i, c) in course.players.iter().enumerate().take(2) {
+        let Some(rank) = c.finish_rank else {
+            continue;
+        };
+        let top = half * i as f32;
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, top), egui::vec2(w, half));
+        // Translucent black curtain over just this half (like the pause curtain).
+        painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(190));
+        let cx = w * 0.5;
+        let cy = top + half * 0.5;
+        let place_col = if rank == 1 {
+            egui::Color32::from_rgb(255, 215, 70)
+        } else {
+            egui::Color32::from_rgb(205, 205, 215)
+        };
+        painter.text(
+            egui::pos2(cx, cy - 48.0),
+            egui::Align2::CENTER_CENTER,
+            "FINISH!",
+            egui::FontId::proportional(38.0),
+            egui::Color32::WHITE,
+        );
+        painter.text(
+            egui::pos2(cx, cy + 6.0),
+            egui::Align2::CENTER_CENTER,
+            format!("No. {}", rank),
+            egui::FontId::proportional(60.0),
+            place_col,
+        );
+        painter.text(
+            egui::pos2(cx, cy + 48.0),
+            egui::Align2::CENTER_CENTER,
+            gates::format_lap(c.current_lap_ms),
+            egui::FontId::proportional(22.0),
+            egui::Color32::from_rgb(77, 220, 255),
+        );
+        painter.text(
+            egui::pos2(cx, cy + 80.0),
+            egui::Align2::CENTER_CENTER,
+            "press  R  to reset",
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(170),
+        );
     }
     Ok(())
 }

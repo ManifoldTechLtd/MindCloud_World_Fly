@@ -27,8 +27,11 @@ pub fn format_lap(ms: f64) -> String {
 pub enum GateEvent {
     /// Drone cleanly crossed gate `index` (of `total`) in order.
     Passed { index: usize, total: usize },
-    /// A lap finished (crossing gate 0). `is_best` if it beat the previous best.
+    /// A lap finished (crossing gate 0). `is_best` if it beat the previous best. Lap mode only.
     LapComplete { lap_ms: f64, is_best: bool },
+    /// A linear (dual) race finished: the final gate was crossed. `total_ms` = time since GO,
+    /// `is_best` if it beat the previous best. Linear mode only.
+    Finished { total_ms: f64, is_best: bool },
 }
 
 #[derive(Clone)]
@@ -54,6 +57,17 @@ pub struct GateCourse {
     pub best_lap_ms: Option<f64>,
     pub current_lap_ms: f64,
 
+    /// Linear (dual-race) mode: the clock starts at GO (`start_race_timer`) and the race ENDS the
+    /// moment the final gate is crossed (no lap loop). Single-player leaves this `false` = lap
+    /// racing (clock starts on the first gate-0 crossing, laps loop forever).
+    pub linear: bool,
+    /// Linear mode only: timestamp (ms) the drone crossed the final gate (`None` until finished);
+    /// once set, `current_lap_ms` is frozen at the finish time.
+    pub finished_at: Option<f64>,
+    /// Linear mode only: finishing place (1 = No.1, 2 = No.2), assigned by the race coordinator in
+    /// the order players crossed the final gate. `None` until this player finishes.
+    pub finish_rank: Option<u8>,
+
     // State
     prev_drone_pos: Option<Vector3<f32>>,
     pulse_time: f32,
@@ -71,6 +85,9 @@ impl GateCourse {
             lap_count: 0,
             best_lap_ms: None,
             current_lap_ms: 0.0,
+            linear: false,
+            finished_at: None,
+            finish_rank: None,
             prev_drone_pos: None,
             pulse_time: 0.0,
             visible: false,
@@ -141,9 +158,11 @@ impl GateCourse {
 
         self.pulse_time += dt;
 
-        // Live lap clock
+        // Live lap clock (frozen once a linear race has finished).
         if let Some(start) = self.lap_start {
-            self.current_lap_ms = now_ms - start;
+            if self.finished_at.is_none() {
+                self.current_lap_ms = now_ms - start;
+            }
         }
 
         if let Some(prev) = self.prev_drone_pos {
@@ -188,8 +207,25 @@ impl GateCourse {
             return;
         }
 
+        if self.linear {
+            // Linear (dual) race: no lap boundary — the clock already started at GO. Mark the gate;
+            // crossing the FINAL one ends the race and freezes the clock at the elapsed time.
+            self.mark_passed(i, events);
+            if self.finished_at.is_none() && self.passed_count() == self.gates.len() {
+                let total_ms = self.lap_start.map_or(0.0, |s| now - s);
+                self.finished_at = Some(now);
+                self.current_lap_ms = total_ms;
+                let is_best = self.best_lap_ms.map_or(true, |b| total_ms < b);
+                if is_best {
+                    self.best_lap_ms = Some(total_ms);
+                }
+                events.push(GateEvent::Finished { total_ms, is_best });
+            }
+            return;
+        }
+
         if i == 0 {
-            // Gate 0 is the lap boundary
+            // Lap mode (single-player): gate 0 is the start/finish line.
             if let Some(start) = self.lap_start {
                 let lap_ms = now - start;
                 self.lap_count += 1;
@@ -241,6 +277,15 @@ impl GateCourse {
         self.lap_start = None;
         self.current_lap_ms = 0.0;
         self.prev_drone_pos = None;
+        self.finished_at = None;
+        self.finish_rank = None;
+    }
+
+    /// Linear (dual) race: begin the clock NOW (at GO) on a freshly cleared course. The lap-mode
+    /// timer (single-player) ignores this and instead starts on the first gate-0 crossing.
+    pub fn start_race_timer(&mut self, now: f64) {
+        self.reset_lap();
+        self.lap_start = Some(now);
     }
 
     pub fn passed_count(&self) -> usize {
@@ -261,5 +306,83 @@ impl GateCourse {
     /// Pulse scale for the next gate (for rendering).
     pub fn pulse_scale(&self) -> f32 {
         1.0 + 0.08 * (self.pulse_time * 0.8 * std::f32::consts::PI * 2.0).sin()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A closed loop of 4 gates in the Z=0 plane (Z-up world).
+    fn square_course(linear: bool) -> GateCourse {
+        let pts = [
+            Vector3::new(20.0, 0.0, 0.0),
+            Vector3::new(0.0, 20.0, 0.0),
+            Vector3::new(-20.0, 0.0, 0.0),
+            Vector3::new(0.0, -20.0, 0.0),
+        ];
+        let mut c = GateCourse::new();
+        c.gate_size = 6.0;
+        c.rebuild(&pts, Vector3::new(0.0, 0.0, 1.0));
+        c.linear = linear;
+        c.visible = true;
+        c
+    }
+
+    /// Fly straight through gate `i` along its travel direction at time `t` (ms); returns events.
+    fn cross(course: &mut GateCourse, i: usize, t: f64) -> Vec<GateEvent> {
+        let pos = course.gates[i].pos;
+        let dir = course.gates[i].travel_dir;
+        course.update(0.016, pos - dir, t); // approach (sets prev_drone_pos, no crossing)
+        course.update(0.016, pos + dir, t) // straddle the gate plane -> crossing
+    }
+
+    #[test]
+    fn linear_race_starts_at_go_and_finishes_on_last_gate() {
+        let mut c = square_course(true);
+        // Clock starts at GO, not on the first gate.
+        c.start_race_timer(500.0);
+        assert_eq!(c.lap_start, Some(500.0));
+        assert!(c.finished_at.is_none());
+
+        let n = c.gates.len();
+        let mut finish_ms = None;
+        for i in 0..n {
+            for e in cross(&mut c, i, 500.0 + (i as f64 + 1.0) * 1000.0) {
+                if let GateEvent::Finished { total_ms, .. } = e {
+                    finish_ms = Some(total_ms);
+                }
+            }
+            // Finish fires only on the LAST gate, never mid-course.
+            if i < n - 1 {
+                assert!(c.finished_at.is_none(), "finished early at gate {i}");
+            }
+        }
+        assert_eq!(c.passed_count(), n);
+        assert!(c.finished_at.is_some(), "linear race must finish after the last gate");
+        // total = (time at last gate) - (GO time).
+        assert_eq!(finish_ms, Some(500.0 + n as f64 * 1000.0 - 500.0));
+        // Clock is frozen at the finish time after finishing.
+        let frozen = c.current_lap_ms;
+        c.update(0.016, c.gates[0].pos, 99_999.0);
+        assert_eq!(c.current_lap_ms, frozen, "clock must freeze after finishing");
+    }
+
+    #[test]
+    fn lap_mode_loops_without_finishing() {
+        let mut c = square_course(false);
+        let n = c.gates.len();
+        // First pass through every gate (gate 0 starts the lap clock).
+        for i in 0..n {
+            cross(&mut c, i, (i as f64 + 1.0) * 1000.0);
+        }
+        // Crossing gate 0 again completes a lap and loops (no finish in lap mode).
+        let evs = cross(&mut c, 0, (n as f64 + 1.0) * 1000.0);
+        assert!(c.finished_at.is_none(), "lap mode never sets finished_at");
+        assert!(
+            evs.iter().any(|e| matches!(e, GateEvent::LapComplete { .. })),
+            "re-crossing gate 0 completes a lap"
+        );
+        assert_eq!(c.lap_count, 1);
     }
 }
