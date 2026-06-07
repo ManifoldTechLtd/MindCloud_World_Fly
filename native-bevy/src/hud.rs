@@ -38,9 +38,8 @@ pub fn draw_race(
                     ui.label(RichText::new("FPV RACE").color(DIM).size(12.0).strong().italics());
                     let passed = course.passed_count();
                     let total = course.gates.len();
-                    let next = if passed < total { passed + 1 } else { total };
                     ui.label(
-                        RichText::new(format!("GATE {:>2} / {}", next, total))
+                        RichText::new(format!("GATE {:>2} / {}", passed, total))
                             .color(Color32::WHITE)
                             .size(12.0),
                     );

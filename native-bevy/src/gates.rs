@@ -40,6 +40,7 @@ pub struct Gate {
     pub inv_world: Matrix4<f32>,
 }
 
+#[derive(Clone)]
 pub struct GateCourse {
     pub gates: Vec<Gate>,
     pub next_gate_idx: usize,

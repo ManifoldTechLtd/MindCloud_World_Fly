@@ -369,7 +369,9 @@ fn hud_system(
         let p = &players.0[0];
         hud::draw_hud(ctx, &p.drone, p.armed, fps, None, None);
         if let Some(course) = &course {
-            hud::draw_race(ctx, &course.0, None, None);
+            if let Some(c) = course.players.first() {
+                hud::draw_race(ctx, c, None, None);
+            }
         }
     } else {
         // Window uses scale_factor_override(1.0) → egui logical points == physical px == the camera
@@ -385,10 +387,13 @@ fn hud_system(
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, min_y), egui::vec2(w, half));
             hud::draw_hud(ctx, &p.drone, p.armed, fps, Some(labels[i]), Some(rect));
         }
-        // Race panel on P1 (top half) only — the single course tracks player 0.
+        // Race panel per half — each player's own course (independent timing + gate count).
         if let Some(course) = &course {
-            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, half));
-            hud::draw_race(ctx, &course.0, Some("P1"), Some(rect));
+            for (i, c) in course.players.iter().enumerate().take(2) {
+                let min_y = if i == 0 { 0.0 } else { half };
+                let rect = egui::Rect::from_min_size(egui::pos2(0.0, min_y), egui::vec2(w, half));
+                hud::draw_race(ctx, c, Some(labels[i]), Some(rect));
+            }
         }
     }
     Ok(())

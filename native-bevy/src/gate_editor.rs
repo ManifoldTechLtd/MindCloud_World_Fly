@@ -103,8 +103,8 @@ fn hit_test(pts: &[Vec3], wu: WorldUp, mp: egui::Pos2, va: f32, vb: f32, zoom: f
 
 fn init_editor(ed: &mut GateEditor, course: &RaceCourse, config: &CurrentSceneConfig) {
     let wu = config.0.world_up;
-    ed.points = course.0.gates.iter().map(|g| Vec3::new(g.pos.x, g.pos.y, g.pos.z)).collect();
-    ed.gate_size = course.0.gate_size;
+    ed.points = course.shared().gates.iter().map(|g| Vec3::new(g.pos.x, g.pos.y, g.pos.z)).collect();
+    ed.gate_size = course.shared().gate_size;
     ed.selected = None;
     ed.dragging = false;
     let (sa, sb, sh) = to_plane(Vec3::from(config.0.spawn), wu);
@@ -442,12 +442,17 @@ fn gate_editor_ui(
     if accept && editor.points.len() >= MIN_GATES {
         let pts: Vec<[f32; 3]> = editor.points.iter().map(|q| [q.x, q.y, q.z]).collect();
         let cg: Vec<cgmath::Vector3<f32>> = editor.points.iter().map(|q| cgmath::Vector3::new(q.x, q.y, q.z)).collect();
-        course.0.gate_size = editor.gate_size;
-        course.0.rebuild(&cg, world_up_vec(wu));
-        course.0.visible = true;
+        let best = course.shared().best_lap_ms;
+        let wuv = world_up_vec(wu);
+        // Rebuild every player's tracker on the new path (identical geometry, fresh pass state).
+        for c in &mut course.players {
+            c.gate_size = editor.gate_size;
+            c.rebuild(&cg, wuv);
+            c.visible = true;
+        }
         if let Some(path) = &splat.ply_path {
             let key = persistence::scene_key(Path::new(path));
-            let rec = SceneRecord { points: pts, gate_size: editor.gate_size, best_lap_ms: course.0.best_lap_ms };
+            let rec = SceneRecord { points: pts, gate_size: editor.gate_size, best_lap_ms: best };
             if let Err(e) = persistence::save_scene_record(&key, &rec) {
                 warn!("[GateEditor] failed to save path: {e}");
             }

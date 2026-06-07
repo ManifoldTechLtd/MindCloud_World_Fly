@@ -3,6 +3,7 @@
 //! verbatim from native `placement.rs` (`compute_orbit_camera` / `update_spawn`); the resulting
 //! web-splat camera is converted to a Bevy transform with the same `* flip_x` the splat node applies.
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
@@ -220,6 +221,10 @@ fn setup_scene(
             cam_xf,
             SplatCamera,
             SceneEntity,
+            // Gate-highlight layers: layer 0 = shared (splat-driven meshes, spawn marker); camera i
+            // also sees layer i+1 — its OWN gate-frame set — so each split view pulses its own next
+            // gate. Single-player (index 0) sees layer 1, the sole gate set.
+            RenderLayers::from_layers(&[0, index as usize + 1]),
         ));
         // Only split-screen cameras get a viewport rect; the single-player camera stays full-window.
         if matches!(*mode, GameMode::SplitScreen) {

@@ -5,10 +5,11 @@
 //! recolours by state (start = white, next = yellow + pulse, others = cyan) and toggles visibility.
 //! `G` shows/hides the whole course. Pass detection + lap timing land in a later slice (race).
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use std::path::Path;
 
-use crate::app_state::{AppState, CurrentSceneConfig, WorldUp};
+use crate::app_state::{AppState, CurrentSceneConfig, GameMode, WorldUp};
 use crate::flight::Players;
 use crate::gates::{self, GateCourse, GateEvent};
 use crate::persistence;
@@ -18,10 +19,23 @@ use crate::splat_plugin::SplatScene;
 /// How many gates ahead of `next` stay lit (matches native `HORIZON`). Applied only while flying.
 const HORIZON: usize = 5;
 
-/// The active race course (pure logic). Inserted once the scene config is ready (in `Placement`),
-/// removed on return to the menu so the next scene rebuilds fresh.
+/// The active race course (pure logic), with **one progress tracker per player**. Every entry
+/// shares identical geometry (gates / size / world-up / visibility, all built from the same control
+/// points); only the live pass / lap / next-gate state differs, so each split-screen pilot races
+/// independently. Inserted once the scene config is ready (in `Placement`), removed on return to the
+/// menu so the next scene rebuilds fresh.
 #[derive(Resource)]
-pub struct RaceCourse(pub GateCourse);
+pub struct RaceCourse {
+    pub players: Vec<GateCourse>,
+}
+
+impl RaceCourse {
+    /// Shared geometry / visibility lives on every entry; player 0 is the canonical copy used for
+    /// geometry reads (gate editor, world-up check, gate count, visibility toggle).
+    pub fn shared(&self) -> &GateCourse {
+        &self.players[0]
+    }
+}
 
 /// Set by the gate editor on Accept (after it rebuilds [`RaceCourse`]) to request a fresh respawn
 /// of the 3D gate frames. `respawn_gate_visuals` consumes it.
@@ -33,10 +47,13 @@ pub struct GateVisualsDirty(pub bool);
 #[derive(Component)]
 struct GateRoot;
 
-/// One gate frame: its course index + the (shared-by-its-4-bars) emissive material to recolour.
+/// One gate frame: its course index, which player's set it belongs to (split-screen renders one set
+/// per player on its own `RenderLayers`, so each view pulses its OWN next gate), and the
+/// (shared-by-its-4-bars) emissive material to recolour.
 #[derive(Component)]
 struct GateVisual {
     index: usize,
+    player: usize,
     material: Handle<StandardMaterial>,
 }
 
@@ -88,6 +105,7 @@ fn ensure_gates_built(
     existing: Option<Res<RaceCourse>>,
     config: Option<Res<CurrentSceneConfig>>,
     splat: Res<SplatScene>,
+    mode: Res<GameMode>,
 ) {
     if existing.is_some() {
         return;
@@ -131,12 +149,18 @@ fn ensure_gates_built(
     course.rebuild(&points, world_up);
     course.visible = true;
 
-    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &course);
     let n = course.gates.len();
-    commands.insert_resource(RaceCourse(course));
+    // One independent progress tracker per player (identical geometry, separate pass/lap state).
+    let n_players = match *mode {
+        GameMode::SinglePlayer => 1,
+        GameMode::SplitScreen => 2,
+    };
+    let race = RaceCourse { players: vec![course; n_players] };
+    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &race);
+    commands.insert_resource(race);
     info!(
-        "[Gates] built course: {} gates ({}); press G to toggle",
-        n,
+        "[Gates] built course: {} gates x {} player(s) ({}); press G to toggle",
+        n, n_players,
         if record.is_some() { "saved path" } else { "demo ring" }
     );
 }
@@ -155,7 +179,7 @@ fn rebuild_gates_on_world_up_change(
     let (Some(config), Some(course)) = (config, course) else {
         return;
     };
-    if course.0.world_up == world_up_vec(config.0.world_up) {
+    if course.shared().world_up == world_up_vec(config.0.world_up) {
         return;
     }
     for e in &roots {
@@ -192,13 +216,13 @@ fn respawn_gate_visuals(
     for e in &roots {
         commands.entity(e).despawn();
     }
-    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &course.0);
-    info!("[Gates] respawned {} gate frames after edit", course.0.gates.len());
+    spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &course);
+    info!("[Gates] respawned {} gate frames after edit", course.shared().gates.len());
 }
 
-/// `Update` (Playing): drive pass detection + lap timing from player 0's (P1) drone position.
-/// The course only reacts while visible (press G). R resets the current lap (matches native).
-/// Single-course: in split-screen the timer tracks P1 only (native races P1 via the controller).
+/// `Update` (Playing): drive pass detection + lap timing **per player** — each `players[i]` tracker
+/// follows player i's drone, so timing + gate count are fully independent across the split. Courses
+/// only react while visible (press G). R resets every player's lap (the master reset).
 fn gate_race_system(
     course: Option<ResMut<RaceCourse>>,
     players: Option<Res<Players>>,
@@ -215,23 +239,32 @@ fn gate_race_system(
         return;
     }
     if keys.just_pressed(KeyCode::KeyR) {
-        course.0.reset_lap();
+        for c in &mut course.players {
+            c.reset_lap();
+        }
     }
-    let d = &players.0[0].drone;
-    let pos = cgmath::Vector3::new(d.x, d.y, d.z);
     let now_ms = time.elapsed_secs_f64() * 1000.0;
     let dt = time.delta_secs();
-    for ev in course.0.update(dt, pos, now_ms) {
-        match ev {
-            GateEvent::Passed { index, total } => {
-                info!("[Race] passed gate {} / {}", index + 1, total);
-            }
-            GateEvent::LapComplete { lap_ms, is_best } => {
-                info!(
-                    "[Race] lap {}{}",
-                    gates::format_lap(lap_ms),
-                    if is_best { " — NEW BEST" } else { "" }
-                );
+    // Each player's tracker follows their own drone, so timing + gate count are independent.
+    for (i, c) in course.players.iter_mut().enumerate() {
+        let Some(p) = players.0.get(i) else {
+            break;
+        };
+        let d = &p.drone;
+        let pos = cgmath::Vector3::new(d.x, d.y, d.z);
+        for ev in c.update(dt, pos, now_ms) {
+            match ev {
+                GateEvent::Passed { index, total } => {
+                    info!("[Race][P{}] passed gate {} / {}", i + 1, index + 1, total);
+                }
+                GateEvent::LapComplete { lap_ms, is_best } => {
+                    info!(
+                        "[Race][P{}] lap {}{}",
+                        i + 1,
+                        gates::format_lap(lap_ms),
+                        if is_best { " — NEW BEST" } else { "" }
+                    );
+                }
             }
         }
     }
@@ -241,8 +274,11 @@ fn gate_race_system(
 fn toggle_gates(keys: Res<ButtonInput<KeyCode>>, course: Option<ResMut<RaceCourse>>) {
     if let Some(mut course) = course {
         if keys.just_pressed(KeyCode::KeyG) {
-            course.0.visible = !course.0.visible;
-            info!("[Gates] visible = {}", course.0.visible);
+            let vis = !course.shared().visible;
+            for c in &mut course.players {
+                c.visible = vis;
+            }
+            info!("[Gates] visible = {}", vis);
         }
     }
 }
@@ -257,15 +293,21 @@ fn update_gate_appearance(
     let Some(course) = course else {
         return;
     };
-    let c = &course.0;
-    let n = c.gates.len();
-    if n == 0 {
+    if course.players.is_empty() {
         return;
     }
-    let pulse = c.pulse_scale();
     // Horizon culling only while flying; in placement show the whole course for editing/overview.
     let flying = *state.get() == AppState::Playing;
     for (gv, mut tf, mut vis) in &mut q {
+        // Each frame belongs to one player's set and reflects THAT player's progress, so each split
+        // view pulses its own next gate (the set is shown only to its camera's RenderLayers).
+        let Some(c) = course.players.get(gv.player) else {
+            continue;
+        };
+        let n = c.gates.len();
+        if n == 0 {
+            continue;
+        }
         let dist = (gv.index + n - c.next_gate_idx) % n;
         let in_horizon = !flying || dist < HORIZON;
         *vis = if c.visible && in_horizon {
@@ -288,7 +330,7 @@ fn update_gate_appearance(
         }
 
         tf.scale = if gv.index == c.next_gate_idx {
-            Vec3::splat(pulse)
+            Vec3::splat(c.pulse_scale())
         } else {
             Vec3::ONE
         };
@@ -316,9 +358,10 @@ fn spawn_gate_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    course: &GateCourse,
+    course: &RaceCourse,
 ) {
-    let size = course.gate_size;
+    let geom = course.shared();
+    let size = geom.gate_size;
     let t = (size * 0.10).max(0.06);
     let half = size * 0.5;
     let h_bar = meshes.add(Cuboid::new(size + t, t, t));
@@ -328,44 +371,55 @@ fn spawn_gate_visuals(
         .spawn((GateRoot, SceneEntity, Transform::default(), Visibility::default()))
         .id();
 
-    for (i, gate) in course.gates.iter().enumerate() {
-        let material = materials.add(StandardMaterial {
-            base_color: Color::BLACK,
-            emissive: LinearRgba::rgb(0.0, 1.5, 2.0),
-            unlit: true,
-            ..default()
-        });
-        let pos = Vec3::new(gate.pos.x, gate.pos.y, gate.pos.z);
-        let rot = gate_basis_quat(gate.travel_dir, course.world_up);
-        commands.entity(root).with_children(|p| {
-            p.spawn((
-                GateVisual { index: i, material: material.clone() },
-                Transform::from_translation(pos).with_rotation(rot),
-                Visibility::default(),
-            ))
-            .with_children(|g| {
-                g.spawn((
-                    Mesh3d(h_bar.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_xyz(0.0, half, 0.0),
-                ));
-                g.spawn((
-                    Mesh3d(h_bar.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_xyz(0.0, -half, 0.0),
-                ));
-                g.spawn((
-                    Mesh3d(v_bar.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_xyz(-half, 0.0, 0.0),
-                ));
-                g.spawn((
-                    Mesh3d(v_bar.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_xyz(half, 0.0, 0.0),
-                ));
+    // One frame set per player. Player p's set lives on RenderLayers `p + 1` so the matching split
+    // camera (layers {0, p+1}) sees ONLY its own set, letting each view pulse its own next gate.
+    // Layer 0 stays shared (splat-driven meshes, spawn marker).
+    for player in 0..course.players.len() {
+        let layer = RenderLayers::layer(player + 1);
+        for (i, gate) in geom.gates.iter().enumerate() {
+            let material = materials.add(StandardMaterial {
+                base_color: Color::BLACK,
+                emissive: LinearRgba::rgb(0.0, 1.5, 2.0),
+                unlit: true,
+                ..default()
             });
-        });
+            let pos = Vec3::new(gate.pos.x, gate.pos.y, gate.pos.z);
+            let rot = gate_basis_quat(gate.travel_dir, geom.world_up);
+            commands.entity(root).with_children(|p| {
+                p.spawn((
+                    GateVisual { index: i, player, material: material.clone() },
+                    Transform::from_translation(pos).with_rotation(rot),
+                    Visibility::default(),
+                    layer.clone(),
+                ))
+                .with_children(|g| {
+                    g.spawn((
+                        Mesh3d(h_bar.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_xyz(0.0, half, 0.0),
+                        layer.clone(),
+                    ));
+                    g.spawn((
+                        Mesh3d(h_bar.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_xyz(0.0, -half, 0.0),
+                        layer.clone(),
+                    ));
+                    g.spawn((
+                        Mesh3d(v_bar.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_xyz(-half, 0.0, 0.0),
+                        layer.clone(),
+                    ));
+                    g.spawn((
+                        Mesh3d(v_bar.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_xyz(half, 0.0, 0.0),
+                        layer.clone(),
+                    ));
+                });
+            });
+        }
     }
 }
 
