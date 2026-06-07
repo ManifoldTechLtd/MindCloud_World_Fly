@@ -513,9 +513,17 @@ fn race_overlay_system(
         egui::Order::Foreground,
         egui::Id::new("race_overlay"),
     ));
+    // The "Press P to start" prompt gets a translucent black backdrop (like the FINISH curtain) so
+    // it reads clearly over the bright 3DGS + the green HUD horizon/ladder underneath (the overlay is
+    // on `Foreground`, above the HUD's `Middle` layer, so the curtain covers those lines).
+    let dim = matches!(*race, RaceState::Ready);
+    let curtain = egui::Color32::from_black_alpha(150);
     // Split-screen: one banner centered in each half. Single-player would be one centered banner,
     // but it never leaves free-flight `Racing` so only the split path is reached in practice.
     if players.0.len() <= 1 {
+        if dim {
+            painter.rect_filled(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)), 0.0, curtain);
+        }
         painter.text(
             egui::pos2(w * 0.5, h * 0.5),
             egui::Align2::CENTER_CENTER,
@@ -526,8 +534,12 @@ fn race_overlay_system(
     } else {
         let half = h * 0.5;
         for i in 0..2 {
+            let top = half * i as f32;
+            if dim {
+                painter.rect_filled(egui::Rect::from_min_size(egui::pos2(0.0, top), egui::vec2(w, half)), 0.0, curtain);
+            }
             painter.text(
-                egui::pos2(w * 0.5, half * i as f32 + half * 0.5),
+                egui::pos2(w * 0.5, top + half * 0.5),
                 egui::Align2::CENTER_CENTER,
                 &text,
                 egui::FontId::proportional(size),
