@@ -458,15 +458,20 @@ impl Drone {
         let forward = Vector3::new(rot.x.x, rot.x.y, rot.x.z);
         let half_size = self.drone_size * 0.5;
 
-        // Camera mount pitch offset (body-frame Y rotation in NED = pitch axis)
+        // Camera mount pitch about the BODY pitch axis (+Y in NED). Positive angle tilts the view
+        // UP (FPV cameras mount upward); Drone mode's negative tilt looks down.
         let mount_deg = match self.flight_mode {
             FlightMode::Fpv => self.camera_mount_angle,
             FlightMode::Drone => self.camera_tilt_angle,
         };
         let mount_rad = mount_deg * DEG2RAD;
-        let tilt_q = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(mount_rad));
-        // Camera pipeline expects q_wb. Convert q_bw→q_wb via conjugate, then apply CAM_TO_NED + tilt.
-        let cam_orient = Self::CAM_TO_NED * self.orientation.conjugate() * tilt_q;
+        // Negate: a right-handed rotation about body +Y pitches forward→down, so we flip the sign to
+        // make a positive mount angle look up.
+        let tilt_q = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(-mount_rad));
+        // Camera pipeline expects q_wb. Convert q_bw→q_wb via conjugate. The tilt is applied in the
+        // BODY frame (left of the world→body rotation) so a yawed-but-level drone pitches the view
+        // without rolling; CAM_TO_NED then maps the tilted body axes into the camera optical frame.
+        let cam_orient = Self::CAM_TO_NED * tilt_q * self.orientation.conjugate();
 
         let cam_pos = pos + forward * half_size;
         (cam_pos, cam_orient)
@@ -631,5 +636,58 @@ impl Drone {
             WorldUp::Colmap => (rot.z.y).max(0.1),
         };
         self.thrust_output = clamp(thrust_base / cos_t, 0.0, self.max_thrust * boost);
+    }
+}
+
+#[cfg(test)]
+mod camera_tilt_tests {
+    use super::*;
+
+    /// Level drone (Z-up) yawed by `heading_deg`, FPV camera mounted at `mount_deg`.
+    fn fpv_level(heading_deg: f32, mount_deg: f32) -> Drone {
+        let mut d = Drone::new();
+        d.world_up = WorldUp::Zup;
+        d.orientation = ned_identity(WorldUp::Zup);
+        d.apply_spawn_heading(heading_deg);
+        d.flight_mode = FlightMode::Fpv;
+        d.camera_mount_angle = mount_deg;
+        d
+    }
+
+    /// |a ⋅ b| for two unit quaternions (≈ 1 iff equal up to double-cover sign).
+    fn quat_align(a: Quaternion<f32>, b: Quaternion<f32>) -> f32 {
+        (a.s * b.s + a.v.x * b.v.x + a.v.y * b.v.y + a.v.z * b.v.z).abs()
+    }
+
+    /// Issue 1: a positive FPV mount angle tilts the *view* UP. The camera forward (`q_wb * +Z`, the
+    /// web-splat view axis) is horizontal at mount 0 and gains a world-up (+Z) component once tilted.
+    #[test]
+    fn positive_mount_looks_up() {
+        let fwd0 = fpv_level(0.0, 0.0).camera_transform().1 * Vector3::unit_z();
+        assert!(fwd0.z.abs() < 1e-3, "mount 0 should look horizontal, got forward.z={}", fwd0.z);
+        let fwd30 = fpv_level(0.0, 30.0).camera_transform().1 * Vector3::unit_z();
+        assert!(fwd30.z > 0.1, "mount +30 should look UP (forward.z>0), got forward.z={}", fwd30.z);
+    }
+
+    /// Issue 2: the mount tilt is applied in the BODY frame, so the camera rotation it induces
+    /// (relative to mount 0) is identical at every heading. The old world-frame tilt made this
+    /// heading-dependent, which appeared as image roll when the drone was yawed.
+    #[test]
+    fn mount_tilt_is_body_frame_so_independent_of_heading() {
+        let theta = 30.0;
+        let delta_at = |heading: f32| {
+            let c0 = fpv_level(heading, 0.0).camera_transform().1;
+            let ct = fpv_level(heading, theta).camera_transform().1;
+            ct * c0.conjugate()
+        };
+        let reference = delta_at(0.0);
+        for &heading in &[15.0_f32, 45.0, 90.0, 180.0, -60.0, 270.0] {
+            let align = quat_align(delta_at(heading), reference);
+            assert!(
+                align > 1.0 - 1e-4,
+                "tilt induced a different camera rotation at heading {heading} (align={align}); \
+                 tilt is not body-frame → it rolls the view when yawed"
+            );
+        }
     }
 }
