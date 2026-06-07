@@ -424,6 +424,7 @@ fn race_system(
     mut race: ResMut<RaceState>,
     mut players: ResMut<Players>,
     mut course: Option<ResMut<RaceCourse>>,
+    mut beep: MessageWriter<crate::audio::CountdownBeep>,
     settings_open: Res<SettingsOpen>,
     menu: Res<crate::menu::MenuState>,
 ) {
@@ -444,6 +445,7 @@ fn race_system(
                     }
                 }
                 *race = RaceState::Countdown { remaining: COUNTDOWN_SECS };
+                beep.write(crate::audio::CountdownBeep { go: false }); // first pip ("3")
                 info!("[Race] countdown started");
             }
         }
@@ -458,8 +460,13 @@ fn race_system(
                         c.start_race_timer(now_ms);
                     }
                 }
+                beep.write(crate::audio::CountdownBeep { go: true });
                 info!("[Race] GO!");
             } else {
+                // A new pip each time the displayed integer drops: "2" at 2.0 s, "1" at 1.0 s.
+                if next.ceil() < remaining.ceil() {
+                    beep.write(crate::audio::CountdownBeep { go: false });
+                }
                 *race = RaceState::Countdown { remaining: next };
             }
         }

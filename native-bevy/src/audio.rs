@@ -66,6 +66,14 @@ impl Default for AudioSettings {
 #[derive(Message)]
 pub struct GatePassed;
 
+/// Fired by `flight::race_system` at each countdown pip (3, 2, 1) and at GO. `go=false` plays the
+/// short pip beep; `go=true` plays the higher/longer GO tone. Decouples the race state machine from
+/// the audio layer (same pattern as `GatePassed`).
+#[derive(Message)]
+pub struct CountdownBeep {
+    pub go: bool,
+}
+
 /// Handle to the procedural looping engine source (built once at startup).
 #[derive(Resource)]
 struct EngineHandle(Handle<EngineAudio>);
@@ -230,6 +238,14 @@ fn decode_wav_mono_f32(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
 #[derive(Resource)]
 struct GateDingHandle(Handle<AudioSource>);
 
+/// Handles to the procedurally-generated countdown beeps (built once at startup): `tick` = the
+/// 3/2/1 pips, `go` = the GO! tone.
+#[derive(Resource)]
+struct CountdownBeepHandles {
+    tick: Handle<AudioSource>,
+    go: Handle<AudioSource>,
+}
+
 /// Marks the single looping engine-sound entity (spawned per flight session).
 #[derive(Component)]
 struct EngineSound;
@@ -329,6 +345,7 @@ impl Plugin for AudioPlugin {
         app.insert_resource(crate::persistence::load_audio_settings().unwrap_or_default());
         app.add_audio_source::<EngineAudio>();
         app.add_message::<GatePassed>();
+        app.add_message::<CountdownBeep>();
         app.add_systems(Startup, setup_audio);
         app.add_systems(OnEnter(AppState::Playing), spawn_engine_sound);
         app.add_systems(OnExit(AppState::Playing), despawn_engine_sound);
@@ -336,7 +353,8 @@ impl Plugin for AudioPlugin {
         app.add_systems(Update, drive_bgm);
         app.add_systems(
             Update,
-            (drive_engine_sound, gate_sfx_system).run_if(in_state(AppState::Playing)),
+            (drive_engine_sound, gate_sfx_system, countdown_sfx_system)
+                .run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -406,6 +424,10 @@ fn setup_audio(
 
     let ding = sources.add(AudioSource { bytes: make_gate_ding_wav().into() });
     commands.insert_resource(GateDingHandle(ding));
+
+    let tick = sources.add(AudioSource { bytes: make_countdown_tick_wav().into() });
+    let go = sources.add(AudioSource { bytes: make_countdown_go_wav().into() });
+    commands.insert_resource(CountdownBeepHandles { tick, go });
 
     // BGM playlists discovered from disk (like bgm.js `_discoverPlaylist`): drop any decodable audio
     // file into `assets/audio/bgm/<init|flight>/` and it joins the loop on next launch. init =
@@ -502,6 +524,41 @@ fn gate_sfx_system(
         AudioPlayer::new(ding.0.clone()),
         PlaybackSettings::DESPAWN.with_volume(Volume::Linear(vol)),
     ));
+}
+
+/// `Update` (Playing): play the matching countdown beep when `race_system` fires a `CountdownBeep`
+/// (a pip for 3/2/1, the GO tone at start). Collapses duplicates so each kind plays at most once per
+/// frame, at `sfx_volume`.
+fn countdown_sfx_system(
+    mut commands: Commands,
+    mut reader: MessageReader<CountdownBeep>,
+    beeps: Res<CountdownBeepHandles>,
+    settings: Res<AudioSettings>,
+) {
+    let (mut play_tick, mut play_go) = (false, false);
+    for ev in reader.read() {
+        if ev.go {
+            play_go = true;
+        } else {
+            play_tick = true;
+        }
+    }
+    if settings.muted || !(play_tick || play_go) {
+        return;
+    }
+    let vol = settings.sfx_volume.clamp(0.0, 1.0);
+    if play_go {
+        commands.spawn((
+            AudioPlayer::new(beeps.go.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(vol)),
+        ));
+    }
+    if play_tick {
+        commands.spawn((
+            AudioPlayer::new(beeps.tick.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(vol)),
+        ));
+    }
 }
 
 /// `Update` (all states): one-track-at-a-time BGM with fades. Picks the playlist from the app state
@@ -629,6 +686,35 @@ fn make_gate_ding_wav() -> Vec<u8> {
     encode_wav_mono_i16(&samples, SR)
 }
 
+/// Build the countdown "pip" beep (the 3/2/1 ticks): a single 720 Hz sine with exponential decay.
+fn make_countdown_tick_wav() -> Vec<u8> {
+    bake_beep_wav(&[(720.0, 1.0)], 0.14, 0.30)
+}
+
+/// Build the countdown "GO" beep — higher, longer, and brighter (octave overtone) than the pips.
+fn make_countdown_go_wav() -> Vec<u8> {
+    bake_beep_wav(&[(1180.0, 1.0), (2360.0, 0.4)], 0.45, 0.34)
+}
+
+/// Bake a mono PCM16 beep: a sum of `(freq_hz, amplitude)` partials under one shared exponential
+/// decay envelope (`peak`→0.001 over `dur` seconds). Sines start at 0, so there's no attack click.
+fn bake_beep_wav(partials: &[(f32, f32)], dur: f32, peak: f32) -> Vec<u8> {
+    const SR: u32 = 44_100;
+    let n = (SR as f32 * dur) as usize;
+    let tau = std::f32::consts::TAU;
+    let mut samples: Vec<i16> = Vec::with_capacity(n);
+    for i in 0..n {
+        let tt = i as f32 / SR as f32;
+        let env = peak * (0.001f32 / peak).powf((tt / dur).min(1.0));
+        let mut s = 0.0;
+        for &(freq, amp) in partials {
+            s += amp * (tau * freq * tt).sin();
+        }
+        samples.push(((env * s).clamp(-1.0, 1.0) * 32_767.0) as i16);
+    }
+    encode_wav_mono_i16(&samples, SR)
+}
+
 /// Minimal canonical 44-byte-header mono 16-bit PCM WAV encoder.
 fn encode_wav_mono_i16(samples: &[i16], sr: u32) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
@@ -670,6 +756,20 @@ mod tests {
         assert_eq!(wav.len(), 44 + 10);
         let riff_len = u32::from_le_bytes(wav[4..8].try_into().unwrap());
         assert_eq!(riff_len as usize, wav.len() - 8);
+    }
+
+    #[test]
+    fn countdown_beeps_are_well_formed() {
+        for (wav, dur) in
+            [(make_countdown_tick_wav(), 0.14_f32), (make_countdown_go_wav(), 0.45_f32)]
+        {
+            assert_eq!(&wav[0..4], b"RIFF");
+            assert_eq!(&wav[8..12], b"WAVE");
+            let n = (44_100.0 * dur) as usize;
+            let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap());
+            assert_eq!(data_len as usize, n * 2);
+            assert_eq!(wav.len(), 44 + n * 2);
+        }
     }
 
     #[test]
