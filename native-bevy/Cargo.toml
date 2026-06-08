@@ -10,12 +10,21 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_audio",
     "bevy_camera",
     "bevy_core_pipeline",
+    "bevy_gltf",
     "bevy_log",
     "bevy_pbr",
     "bevy_render",
+    "bevy_scene",
     "bevy_state",
     "bevy_winit",
+    # Loads glTF animation clips (drone2.glb's propeller spin) + pulls in bevy_animation.
+    "gltf_animation",
     "multi_threaded",
+    "png",
+    # Auto-registers every #[derive(Reflect)] component into the type registry at startup. glTF
+    # scenes are spawned by reflection-cloning their entities, so without this scene spawn panics on
+    # the first unregistered type (Transform, Visibility, Mesh3d, ...). A Bevy default we lost above.
+    "reflect_auto_register",
     "std",
     "vorbis",
     "wav",
@@ -47,5 +56,10 @@ wgpu = "27.0"
 [profile.dev.package."*"]
 opt-level = 3
 
+# Our crate at opt-level=1 (deps stay opt-3 above). Keep this >= 1: at opt-level=0 the collision-octree
+# build (crate::collision, run on the PLY-load thread over millions of points) is unoptimized and makes
+# scene loading take ~1.5 min. opt-1 restores normal load times. (An earlier opt-1 codegen SIGSEGV was
+# actually a since-removed observer's pathological monomorphization, NOT opt-1 itself — HEAD built fine
+# at opt-1.) Could go to 2/3 for a bit more speed, but opt-1 is the proven-stable level on this toolchain.
 [profile.dev]
 opt-level = 1

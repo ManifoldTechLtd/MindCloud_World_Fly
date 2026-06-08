@@ -7,6 +7,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::gltf::GltfAssetLabel;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -27,6 +28,26 @@ use crate::SceneInput;
 /// the configured spawn point + heading. Despawned by `flight::setup_flight`.
 #[derive(Component)]
 pub(crate) struct SpawnMarker;
+
+/// The drone model asset (glTF) shown at the spawn point and flown in `Playing`. Shared by
+/// `placement` + `flight` so both load the same model. NOTE: this Sketchfab DJI FPV model has 0
+/// animations (propellers stay static) AND bakes an arbitrary rotation into its glTF root node, so it
+/// renders tilted; `DRONE_TILT_FIX` (below) cancels that so it sits level.
+pub(crate) const DRONE_MODEL_ASSET: &str = "model/dji_fvp_-_sdc_performance_edition.glb";
+
+/// Uniform scale applied to `DRONE_MODEL_ASSET`. This model spans ~6.3 units, so ~0.08 → ~0.5 m
+/// across; bump up/down if it loads too small/large. (Orientation fix = the +90° X rotation
+/// applied to the model children below.)
+pub(crate) const DRONE_MODEL_SCALE: f32 = 0.1;
+
+/// Per-model orientation correction, right-multiplied onto the drone's world rotation in BOTH
+/// placement (`drone_child`) and flight (`drone_model_system`). The DJI FPV glTF bakes an arbitrary
+/// rotation `R_root` into its `Sketchfab_model` node (so it renders tilted) AND its body is modelled
+/// facing +Z, i.e. 180° off our forward convention. This quaternion is `Ry(180°) · Rx(-90°) · R_root⁻¹`:
+/// it cancels the baked rotation, restores the standard Sketchfab Z-up→Y-up orientation (level), then
+/// yaws 180° about the up axis so the nose faces forward. Precomputed for THIS model (det(R_root)=1,
+/// verified); recompute if `DRONE_MODEL_ASSET` changes.
+pub(crate) const DRONE_TILT_FIX: Quat = Quat::from_xyzw(0.176037, 0.976306, 0.061927, 0.109556);
 
 /// Set by the placement overlay each frame: whether egui currently wants keyboard input (a text
 /// field is focused → suppress WASD spawn movement) and/or pointer input (cursor over the panel →
@@ -131,6 +152,7 @@ fn setup_scene(
     mode: Res<GameMode>,
     config: Res<CurrentSceneConfig>,
     orbit: Res<OrbitState>,
+    asset_server: Res<AssetServer>,
 ) {
     // Orbit focus + demo-object anchor = the configured spawn point (scene center on first use).
     let focus = Vec3::from(config.0.spawn);
@@ -149,26 +171,51 @@ fn setup_scene(
         SceneEntity,
     ));
 
-    // --- Spawn marker: a flat, dark-yellow isosceles triangular prism (arrow) lying on the ground
-    // at the spawn point, pointing along the heading. `placement_update` moves/rotates it each frame;
-    // the prism is modeled in local XY (apex +Y, flat through local Z) and the parent rotation maps
-    // local +Y → heading and +Z → world up, so it stays flat and points where the drone will face.
-    // Per-face vertex colours (brighter top than sides) give it a 3D look; the material is unlit (to
-    // punch through the bright splat) and double-sided so the underside shows when orbiting below.
-    let arrow_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.95, 0.0), // dark / muted yellow
-        unlit: true,
-        cull_mode: None,
-        ..default()
+    // --- Spawn marker(s): a transform-only `SpawnMarker` parent driven by `placement_update`
+    // (local +Y = heading, +Z = world up, +X = right); `flight::setup_flight` despawns it recursively.
+    // Children depend on the mode:
+    //   SinglePlayer: just the drone model on the spawn point (no arrow — the drone IS the marker).
+    //   SplitScreen:  the flat yellow heading arrow at the centre + a static drone at each player's
+    //     start (P1 left / P2 right along local X = the heading's "right", offset ±SPLIT_SPAWN_OFFSET
+    //     so they sit exactly where `setup_flight` places the two flight drones).
+    let drone_model = asset_server.load(GltfAssetLabel::Scene(0).from_asset(DRONE_MODEL_ASSET));
+    // Child transform that stands the glTF model (native +Y up, -Z forward) upright facing the
+    // parent's local +Y (heading): +90° about X, then DRONE_TILT_FIX to level this model's baked tilt,
+    // scaled by DRONE_MODEL_SCALE; `offset` is along local X.
+    let drone_child = |offset: f32| {
+        Transform::from_xyz(offset, 0.0, 0.0)
+            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) * DRONE_TILT_FIX)
+            .with_scale(Vec3::splat(DRONE_MODEL_SCALE))
+    };
+    // Heading arrow (split-screen only): a flat unlit double-sided isosceles prism + its mesh.
+    let arrow = matches!(*mode, GameMode::SplitScreen).then(|| {
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.95, 0.0), // dark / muted yellow
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+        (meshes.add(arrow_prism_mesh(1.4, 0.4, 0.12)), mat) // length, width, height
     });
-    commands.spawn((
-        Mesh3d(meshes.add(arrow_prism_mesh(1.4, 0.4, 0.12))), // length (长), width (宽), height (高)
-        MeshMaterial3d(arrow_mat),
-        Transform::from_translation(focus),
-        Visibility::default(),
-        SpawnMarker,
-        SceneEntity,
-    ));
+    commands
+        .spawn((
+            Transform::from_translation(focus),
+            Visibility::default(),
+            SpawnMarker,
+            SceneEntity,
+        ))
+        .with_children(|p| match *mode {
+            GameMode::SinglePlayer => {
+                p.spawn((SceneRoot(drone_model.clone()), drone_child(0.0)));
+            }
+            GameMode::SplitScreen => {
+                let (mesh, mat) = arrow.clone().unwrap();
+                p.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::default()));
+                let d = crate::flight::SPLIT_SPAWN_OFFSET;
+                p.spawn((SceneRoot(drone_model.clone()), drone_child(-d))); // P1 (left)
+                p.spawn((SceneRoot(drone_model.clone()), drone_child(d))); // P2 (right)
+            }
+        });
 
     // --- Camera(s): each renders the full scene (splat + PBR meshes). In split mode the two stacked
     // cameras share the window target and `scene::set_split_viewports` assigns their viewport rects.
@@ -183,6 +230,16 @@ fn setup_scene(
         GameMode::SplitScreen => &[(0, 0), (1, 1)],
     };
     for &(index, order) in cams {
+        // Layer 0 = shared (splat-driven meshes, the spawn marker). Camera i also sees layer i+1 (its
+        // OWN gate-frame set, so each split view pulses its own next gate). In split-screen each camera
+        // additionally sees the OTHER player's in-flight drone layer (DRONE_VIS_LAYER_BASE + other), so
+        // pilots see the opponent's aircraft but never their own FPV body.
+        let mut layer_ids = vec![0usize, index as usize + 1];
+        if matches!(*mode, GameMode::SplitScreen) {
+            // also see the OTHER player's in-flight drone (player 1-index), never our own FPV body.
+            layer_ids.push(crate::flight::DRONE_VIS_LAYER_BASE + (1 - index as usize));
+        }
+        let render_layers = RenderLayers::from_layers(&layer_ids);
         let mut cam = commands.spawn((
             Camera3d::default(),
             Camera {
@@ -207,10 +264,7 @@ fn setup_scene(
             cam_xf,
             SplatCamera,
             SceneEntity,
-            // Gate-highlight layers: layer 0 = shared (splat-driven meshes, spawn marker); camera i
-            // also sees layer i+1 — its OWN gate-frame set — so each split view pulses its own next
-            // gate. Single-player (index 0) sees layer 1, the sole gate set.
-            RenderLayers::from_layers(&[0, index as usize + 1]),
+            render_layers.clone(),
         ));
         // Only split-screen cameras get a viewport rect; the single-player camera stays full-window.
         if matches!(*mode, GameMode::SplitScreen) {

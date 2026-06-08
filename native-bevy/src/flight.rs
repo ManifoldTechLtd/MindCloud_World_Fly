@@ -1,8 +1,12 @@
 //! Flight phase: the player drone resource + the systems that drive it (keyboard → physics, then
 //! physics → camera). Registered by [`FlightPlugin`]; active only in `AppState::Playing`.
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::ecs::observer::On;
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy::scene::SceneInstanceReady;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
 use crate::app_state::{AppState, CurrentSceneConfig, GameMode, WorldUp};
@@ -13,9 +17,33 @@ use crate::hud;
 use crate::input_plugin::{self, ControllerRes, HidConnections, HidDevices};
 use crate::persistence;
 use crate::placement::SpawnMarker;
-use crate::scene::SplitCamera;
+use crate::scene::{SceneEntity, SplitCamera};
 use crate::settings_ui;
 use crate::splat_plugin::{SplatCamera, SplatScene};
+
+/// Side-by-side spawn offset for split-screen (P1 left / P2 right along the heading's perpendicular).
+/// Shared with `placement::setup_scene` so the placement drones sit exactly on each player's start.
+pub const SPLIT_SPAWN_OFFSET: f32 = 2.5;
+
+/// RenderLayers base for the in-flight drone models: player `i`'s model lives on layer
+/// `DRONE_VIS_LAYER_BASE + i`. A camera renders the OTHER player's layer (never its own) so each
+/// FPV pilot sees the opponent's aircraft but not their own. Gate sets use layers 1/2, so start at 3.
+pub const DRONE_VIS_LAYER_BASE: usize = 3;
+
+/// Marks an in-flight drone model entity (a glTF scene) following player `player`'s body.
+#[derive(Component)]
+pub struct DroneModel {
+    pub player: usize,
+}
+
+/// Built once at startup: the propeller animation graph + clip node, played on each in-flight drone
+/// model (see `play_drone_propellers`). Placement drones never play it (that system runs only in
+/// `Playing`), so rotors spin in flight but stay still while placing.
+#[derive(Resource)]
+struct DroneAnim {
+    graph: Handle<AnimationGraph>,
+    index: AnimationNodeIndex,
+}
 
 /// One player's drone + its keyboard state + armed flag.
 pub struct PlayerState {
@@ -76,9 +104,12 @@ impl Plugin for FlightPlugin {
         app.init_resource::<RaceState>();
         app.init_resource::<Players>();
         app.add_systems(OnEnter(AppState::Playing), setup_flight);
+        app.add_observer(propagate_drone_render_layers);
+        app.add_systems(Startup, setup_drone_anim);
+        app.add_systems(Update, play_drone_propellers.run_if(in_state(AppState::Playing)));
         app.add_systems(
             Update,
-            (settings_toggle_system, race_system, drone_input_system, drone_camera_system)
+            (settings_toggle_system, race_system, drone_input_system, drone_camera_system, drone_model_system)
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         );
@@ -109,6 +140,7 @@ fn setup_flight(
     config: Res<CurrentSceneConfig>,
     mode: Res<GameMode>,
     markers: Query<Entity, With<SpawnMarker>>,
+    asset_server: Res<AssetServer>,
 ) {
     let s = config.0.spawn;
     let make = |offset: Vec3| -> Drone {
@@ -138,7 +170,7 @@ fn setup_flight(
                 WorldUp::Zup => Vec3::new(h.cos(), -h.sin(), 0.0),
                 WorldUp::Colmap => Vec3::new(h.sin(), 0.0, -h.cos()),
             };
-            let d = 2.5;
+            let d = SPLIT_SPAWN_OFFSET;
             vec![
                 PlayerState { drone: make(-right * d), keys: KeyState::default(), armed: true },
                 PlayerState { drone: make(right * d), keys: KeyState::default(), armed: true },
@@ -149,6 +181,7 @@ fn setup_flight(
         "[Playing] {} drone(s) spawned at {:?} heading {:.1} ({:?})",
         players.len(), s, config.0.heading_deg, *mode
     );
+    let player_count = players.len();
     commands.insert_resource(Players(players));
     commands.insert_resource(SettingsOpen(false));
     // Split-screen is a race: drones stay pinned at spawn until P starts the 3-2-1 countdown.
@@ -157,9 +190,24 @@ fn setup_flight(
         GameMode::SplitScreen => RaceState::Ready,
         GameMode::SinglePlayer => RaceState::Racing { go_flash: 0.0 },
     });
-    // The placement spawn marker is not shown during flight.
+    // The placement spawn marker is not shown during flight; instead each player gets a drone model
+    // that follows its body. Player `i`'s model lives on RenderLayers `DRONE_VIS_LAYER_BASE + i` and
+    // each FPV camera renders only the OTHER player's layer, so pilots see the opponent but not
+    // themselves (single-player's lone model is on a layer its camera never renders → invisible).
     for e in &markers {
         commands.entity(e).despawn();
+    }
+    let drone_model =
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::placement::DRONE_MODEL_ASSET));
+    for i in 0..player_count {
+        commands.spawn((
+            SceneRoot(drone_model.clone()),
+            Transform::default(),
+            Visibility::default(),
+            DroneModel { player: i },
+            RenderLayers::layer(DRONE_VIS_LAYER_BASE + i),
+            SceneEntity,
+        ));
     }
 }
 
@@ -348,6 +396,81 @@ fn drone_camera_system(
         let q = cam_orient.conjugate() * flip_x;
         t.translation = Vec3::new(pos.x, pos.y, pos.z);
         t.rotation = Quat::from_xyzw(q.v.x, q.v.y, q.v.z, q.s);
+    }
+}
+
+/// `On(SceneInstanceReady)`: when a `DroneModel`'s glTF scene finishes spawning, copy the model's
+/// `RenderLayers` onto every descendant (RenderLayers do NOT propagate through the hierarchy, so the
+/// scene's mesh entities would otherwise default to layer 0 and be visible to every camera — incl.
+/// the pilot's own FPV view). Scenes without `DroneModel` (e.g. placement markers) are ignored.
+fn propagate_drone_render_layers(
+    ready: On<SceneInstanceReady>,
+    roots: Query<&RenderLayers, With<DroneModel>>,
+    children: Query<&Children>,
+    mut commands: Commands,
+) {
+    let root = ready.event_target();
+    let Ok(layers) = roots.get(root) else {
+        return;
+    };
+    for descendant in children.iter_descendants::<Children>(root) {
+        commands.entity(descendant).insert(layers.clone());
+    }
+}
+
+/// `Update` (Playing): place each `DroneModel` on its player's body pose. `orientation` is q_bw (NED
+/// body→world); `Matrix3::from` columns are the body axes in world (col0=+X fwd, col1=+Y right,
+/// col2=+Z down). The glTF model is native +Y up / -Z forward / +X right, so the world rotation maps
+/// model +X→right, +Y→up(-down), +Z→-forward. Position = body centre; scale = the placement scale.
+fn drone_model_system(players: Res<Players>, mut models: Query<(&DroneModel, &mut Transform)>) {
+    if players.0.is_empty() {
+        return;
+    }
+    for (m, mut t) in &mut models {
+        let Some(p) = players.0.get(m.player) else {
+            continue;
+        };
+        let d = &p.drone;
+        let rot = cgmath::Matrix3::from(d.orientation);
+        let fwd = Vec3::new(rot.x.x, rot.x.y, rot.x.z);
+        let right = Vec3::new(rot.y.x, rot.y.y, rot.y.z);
+        let down = Vec3::new(rot.z.x, rot.z.y, rot.z.z);
+        t.translation = Vec3::new(d.x, d.y, d.z);
+        t.rotation = Quat::from_mat3(&Mat3::from_cols(right, -down, -fwd)) * crate::placement::DRONE_TILT_FIX;
+        t.scale = Vec3::splat(crate::placement::DRONE_MODEL_SCALE);
+    }
+}
+
+/// `Startup`: build the propeller animation graph from the drone model's sole glTF clip and store it.
+/// The clip handle loads lazily; the graph only references it, so this is safe before it's ready.
+fn setup_drone_anim(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    let clip = asset_server
+        .load(GltfAssetLabel::Animation(0).from_asset(crate::placement::DRONE_MODEL_ASSET));
+    let (graph, index) = AnimationGraph::from_clip(clip);
+    commands.insert_resource(DroneAnim { graph: graphs.add(graph), index });
+}
+
+/// `Update` (Playing): the glTF loader adds an (idle) `AnimationPlayer` to each spawned drone scene;
+/// when one first appears, attach the propeller graph and loop the clip so the rotors spin. Running
+/// only in `Playing` means placement drones (whose players appear in `Placement`) never start, so
+/// their propellers stay still.
+fn play_drone_propellers(
+    mut commands: Commands,
+    anim: Option<Res<DroneAnim>>,
+    mut new_players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+) {
+    let Some(anim) = anim else {
+        return;
+    };
+    for (entity, mut player) in &mut new_players {
+        player.play(anim.index).repeat();
+        commands
+            .entity(entity)
+            .insert(AnimationGraphHandle(anim.graph.clone()));
     }
 }
 

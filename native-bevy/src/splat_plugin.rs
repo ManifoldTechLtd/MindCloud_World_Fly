@@ -69,16 +69,25 @@ impl SplatScene {
         self.cloud_points.clear();
         self.collision_octree = None;
         let handle = std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
             let file = std::fs::File::open(&path).expect("Failed to open PLY");
             let reader = std::io::BufReader::new(file);
             let pc = GenericGaussianPointCloud::load(reader).expect("Failed to parse PLY");
+            let parse_s = t0.elapsed().as_secs_f32();
             // Build the collision octree on this background thread (opacity 0.02 filtered positions,
             // matching native) so the heavy extraction + subdivision never stalls the main thread.
             let aabb = &pc.aabb;
             let bmin = [aabb.min.x, aabb.min.y, aabb.min.z];
             let bmax = [aabb.max.x, aabb.max.y, aabb.max.z];
             let mut octree = crate::collision::Octree::new();
+            let t1 = std::time::Instant::now();
             octree.build(pc.extract_positions_filtered(0.02), bmin, bmax);
+            info!(
+                "[Loading] PLY parse {:.1}s + octree build {:.1}s = {:.1}s total",
+                parse_s,
+                t1.elapsed().as_secs_f32(),
+                t0.elapsed().as_secs_f32()
+            );
             (pc, octree)
         });
         self.loader = Some(handle);

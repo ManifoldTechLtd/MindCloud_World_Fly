@@ -1,0 +1,22 @@
+# rustc/LLVM ThinLTO over the large `bevy_pbr` crate (built at opt-level=3 by
+# `[profile.dev.package."*"]` in Cargo.toml, for runtime FPS) overflows rustc's default ~8 MB
+# codegen-thread stack and SIGSEGVs ("could not compile `bevy_pbr` ... signal: 11"). Give rustc's
+# threads a 1 GB stack so `cargo build` / `cargo run` don't crash. Applies to every cargo invocation
+# run from this directory, so the fix is automatic (no need to remember `RUST_MIN_STACK=...`).
+# This is a 24-core machine. With default `-j24`, enabling a feature that invalidates ~10 large bevy
+# render crates makes them all run opt-level=3 codegen at once; combined with the big stacks below
+# that spikes memory and faults stack pages (rustc misreports it as "stack overflow"). Capping jobs
+# keeps only a few heavy compiles in flight at a time. Bump back up once everything is built/cached.
+[build]
+# Serialized to 1 (was 4): this toolchain's LLVM intermittently SIGSEGVs in codegen under concurrent
+# load (faults spread to multiple crates). One rustc at a time minimizes that. Slower; raise once built.
+jobs = 1
+# This 1.95.0 toolchain's LLVM SIGSEGVs in codegen on our crate. Most stable combo found:
+#   incremental = false  (here)  -> a crashed/interrupted build can't corrupt an incremental cache and
+#                                    poison every later build (SIGFPE / "collect2: ld returned 1").
+#   opt-level    = 0     (Cargo.toml [profile.dev]) -> skips the opt-1 LLVM pass that faults.
+# If a build still dies mid-codegen, clear stale state: `rm -rf target/debug/incremental`.
+incremental = false
+
+[env]
+RUST_MIN_STACK = "1073741824"
