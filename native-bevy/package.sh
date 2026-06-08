@@ -30,6 +30,13 @@ cp -r assets "$OUT/assets"
 # Scenes live in scene/, not assets/ — drop any sample .ply bundled under assets/ to stay lean.
 find "$OUT/assets" -name '*.ply' -delete 2>/dev/null || true
 
+# Ship saved settings: the app reads/writes `config/` right next to `assets/`, so bundling it makes
+# the package pre-configured (tuned drone, controller calibration, scene setups). Best-effort — the
+# app creates `config/` at runtime if it's absent here.
+if [ -d config ]; then
+    cp -r config "$OUT/config"
+fi
+
 # Launcher: cd into the app directory first so assets/ and scene/ resolve correctly.
 cat > "$OUT/run.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -68,7 +75,7 @@ MindCloud World Fly — 便携版 (Linux)
      检查 Vulkan 是否就绪:  vulkaninfo | head   (来自 vulkan-tools 包)
 
 场景文件:放进 scene/ 文件夹 (*.ply)。
-设置与存档:保存在 ~/.config/mindcloud-fly/。
+设置与存档:保存在本程序目录的 config/ 文件夹 (与 assets/ 同级)，随包携带。
 遥控器 (可选):参见项目根目录的 setup_udev.sh。
 
 注意:本可执行文件要求目标系统的 glibc 版本不低于构建这台机器。

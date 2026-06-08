@@ -5,3 +5,6 @@ scene/*
 asset/music/
 tools/
 tmp/
+# Runtime persistence (settings / calibration / scene configs) — lives beside assets/, is created
+# at runtime and bundled per-package by package.sh; never committed to the repo.
+native-bevy/config/

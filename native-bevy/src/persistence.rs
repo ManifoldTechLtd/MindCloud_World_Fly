@@ -1,4 +1,5 @@
-//! Config persistence — JSON files under `~/.config/mindcloud-fly/`.
+//! Config persistence — JSON files in a `config/` folder beside the app's `assets/` (dev:
+//! `native-bevy/config/` via `CARGO_MANIFEST_DIR`; packaged: a `config/` next to the binary).
 //!
 //! Ported from `native/src/persistence.rs`. **Subset for this slice**: only the per-scene config
 //! (`world_up` / `spawn` / `heading`). The other persisted blobs (drone settings, HID calibration,
@@ -9,14 +10,19 @@ use crate::app_state::SceneConfig;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Config directory (stable regardless of CWD): `~/.config/mindcloud-fly`, else `.`.
-/// Same location native uses — this is shared user data, not a code dependency on `native/`.
+/// Persistence directory: a `config/` folder that lives NEXT TO the app's `assets/`, so the whole
+/// app (binary + assets + saved settings) is self-contained and can be packaged or copied as one
+/// unit. The base path mirrors how Bevy resolves `assets/`, so `config/` is always its sibling:
+///   - `BEVY_ASSET_ROOT` if set (matches Bevy; used by tests / advanced setups),
+///   - else `CARGO_MANIFEST_DIR` (set by `cargo run` in dev) -> `native-bevy/config`,
+///   - else the executable's own directory (a packaged build) -> `<app_dir>/config`.
 fn config_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config").join("mindcloud-fly")
-    } else {
-        PathBuf::from(".")
-    }
+    let base = std::env::var_os("BEVY_ASSET_ROOT")
+        .or_else(|| std::env::var_os("CARGO_MANIFEST_DIR"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("config")
 }
 
 fn ensure_config_dir() {
@@ -281,5 +287,17 @@ mod tests {
         // Degenerate names never produce an empty (invalid) filename.
         assert_eq!(sanitize_name("///"), "controller");
         assert_eq!(sanitize_name(""), "controller");
+    }
+
+    #[test]
+    fn config_dir_sits_next_to_assets_never_in_home() {
+        // Mirrors Bevy's asset base path. Under `cargo test`, CARGO_MANIFEST_DIR is set, so config
+        // resolves to `<crate>/config` (sibling of `<crate>/assets`) — never `$HOME/.config`.
+        let dir = config_dir();
+        assert_eq!(dir.file_name().unwrap(), "config");
+        if std::env::var_os("BEVY_ASSET_ROOT").is_none() {
+            let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+            assert_eq!(dir, Path::new(&manifest).join("config"));
+        }
     }
 }
