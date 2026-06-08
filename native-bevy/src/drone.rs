@@ -601,8 +601,33 @@ impl Drone {
         let yaw_active = input.yaw.abs() > 0.05;
 
         // ---- 1. Sticks → target tilt angles (degrees) ----
-        let target_pitch = input.pitch * max_angle * rate_p;
-        let target_roll = -input.roll * max_angle * rate_r;
+        // Pitch/roll stick directly commands tilt (original Drone feel): the drone leans and the
+        // tilted thrust accelerates it (real attitude→velocity coupling). When a stick is centered
+        // we ADD a velocity-hold brake: a counter-tilt proportional to that axis' horizontal speed,
+        // so the drone leans back and decelerates to a stop instead of drifting. The brake is faded
+        // out by stick deflection (`1 - |stick|`) so a held stick stays pure attitude command.
+        let stick_pitch = input.pitch * max_angle * rate_p;
+        let stick_roll = -input.roll * max_angle * rate_r;
+
+        // Horizontal velocity resolved onto the body forward / right axes (world cols of q_bw).
+        let rot = Matrix3::from(self.orientation);
+        let fwd = Vector3::new(rot.x.x, rot.x.y, rot.x.z);   // body +X (forward) in world
+        let right = Vector3::new(rot.y.x, rot.y.y, rot.y.z); // body +Y (right) in world
+        let (v_fwd, v_right) = match self.world_up {
+            WorldUp::Zup => (self.vx * fwd.x + self.vy * fwd.y, self.vx * right.x + self.vy * right.y),
+            WorldUp::Colmap => (self.vx * fwd.x + self.vz * fwd.z, self.vx * right.x + self.vz * right.z),
+        };
+        // In BOTH world-up frames the tilt→accel coupling is `accel_fwd = -sin(body_pitch)` and
+        // `accel_right = -sin(body_roll)` (thrust leans with the body), and the P-controller drives
+        // `body_{pitch,roll} → target_{pitch,roll}`. So a target tilt of `+gain·v` produces an
+        // acceleration of `≈ -gain·v` along that axis — exactly the brake we want. Both signs +.
+        let brake_gain = self.drone_vel_kp;
+        let brake_pitch = clamp(brake_gain * v_fwd, -max_angle, max_angle);
+        let brake_roll = clamp(brake_gain * v_right, -max_angle, max_angle);
+        let pw = input.pitch.abs().min(1.0);
+        let rw = input.roll.abs().min(1.0);
+        let target_pitch = stick_pitch + (1.0 - pw) * brake_pitch;
+        let target_roll = stick_roll + (1.0 - rw) * brake_roll;
 
         // ---- 2. Attitude P-controller ----
         let (_, body_pitch_deg, body_roll_deg) = self.decompose_orientation();
@@ -628,14 +653,27 @@ impl Drone {
         let omega_z = self.yaw_rate * DEG2RAD;
         self.integrate_orientation(omega_x, omega_y, omega_z, dt);
 
-        // ---- 5. Throttle → thrust with tilt compensation ----
-        let thrust_base = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
+        // ---- 5. Throttle → target vertical speed (altitude-velocity hold) ----
+        // Throttle commands a vertical SPEED, not raw thrust: >0 climbs, <0 descends, and centered
+        // (0) holds altitude. A P-controller on vertical-velocity error picks the thrust = hover
+        // thrust (= weight, tilt-compensated by 1/cos_t) scaled for the commanded vertical accel, so
+        // releasing the throttle brakes any climb/sink back to zero vertical speed.
+        let target_vspeed = input.throttle * self.drone_max_vspeed; // m/s, + = up
+        let cur_vspeed = match self.world_up {
+            WorldUp::Zup => self.vz,
+            WorldUp::Colmap => -self.vy, // +Y = down, so up-speed = -vy
+        };
+        let accel_cmd = (target_vspeed - cur_vspeed) * self.drone_alt_kp; // desired vertical accel
         let rot = Matrix3::from(self.orientation);
         let cos_t = match self.world_up {
             WorldUp::Zup => (-rot.z.z).max(0.1),
             WorldUp::Colmap => (rot.z.y).max(0.1),
         };
-        self.thrust_output = clamp(thrust_base / cos_t, 0.0, self.max_thrust * boost);
+        // thrust_output is grams-force; level hover = weight = mass (g). Net vertical accel from a
+        // thrust T is cos_t·(T/mass)·G − G, so T = mass·(G + accel_cmd)/(G·cos_t) yields accel_cmd.
+        let hover = self.mass.max(1.0);
+        let thrust_cmd = hover * (1.0 + accel_cmd / G) / cos_t;
+        self.thrust_output = clamp(thrust_cmd, 0.0, self.max_thrust * boost);
     }
 }
 
