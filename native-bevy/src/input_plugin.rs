@@ -110,8 +110,8 @@ pub fn disconnect_hid(conns: &mut HidConnections, ctrl: &mut Controller, player:
 pub fn slot_key(mode: GameMode, player: usize) -> &'static str {
     match (mode, player) {
         (GameMode::SinglePlayer, _) => "single",
-        (GameMode::SplitScreen, 0) => "dual_p1",
-        (GameMode::SplitScreen, _) => "dual_p2",
+        (GameMode::DualPlayer, 0) => "dual_p1",
+        (GameMode::DualPlayer, _) => "dual_p2",
     }
 }
 
@@ -126,7 +126,7 @@ fn reconcile_hid(
 ) {
     let active = match *mode {
         GameMode::SinglePlayer => 1,
-        GameMode::SplitScreen => 2,
+        GameMode::DualPlayer => 2,
     };
     let devices = list_rc_devices();
     for slot in 0..active {

@@ -39,6 +39,7 @@ impl Plugin for MenuPlugin {
             EguiPrimaryContextPass,
             (
                 mode_select_system.run_if(in_state(AppState::ModeSelect)),
+                game_type_select_system.run_if(in_state(AppState::GameTypeSelect)),
                 scene_select_system.run_if(in_state(AppState::SceneSelect)),
                 loading_screen_system.run_if(in_state(AppState::Loading)),
                 exit_dialog_system,
@@ -88,7 +89,7 @@ fn cleanup_scene(mut commands: Commands, q: Query<Entity, With<SceneEntity>>) {
     }
 }
 
-/// ModeSelect menu.
+// ModeSelect menu.
 fn mode_select_system(
     mut contexts: EguiContexts,
     mut mode: ResMut<GameMode>,
@@ -99,8 +100,32 @@ fn mode_select_system(
     };
     if let ModeAction::Select(m) = menu_ui::draw_mode_select(ctx) {
         *mode = m;
-        info!("[ModeSelect] mode = {:?} -> SceneSelect", m);
-        next.set(AppState::SceneSelect);
+        info!("[ModeSelect] mode = {:?} -> GameTypeSelect", m);
+        next.set(AppState::GameTypeSelect);
+    }
+    Ok(())
+}
+
+/// GameTypeSelect menu (Race vs Battle).
+fn game_type_select_system(
+    mut contexts: EguiContexts,
+    mode: Res<GameMode>,
+    mut game_type: ResMut<crate::app_state::GameType>,
+    mut next: ResMut<NextState<AppState>>,
+) -> Result {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    match menu_ui::draw_game_type_select(ctx, *mode) {
+        menu_ui::GameTypeAction::Select(gt) => {
+            *game_type = gt;
+            info!("[GameTypeSelect] game type = {:?} -> SceneSelect", gt);
+            next.set(AppState::SceneSelect);
+        }
+        menu_ui::GameTypeAction::Back => {
+            next.set(AppState::ModeSelect);
+        }
+        menu_ui::GameTypeAction::None => {}
     }
     Ok(())
 }
@@ -110,6 +135,7 @@ fn scene_select_system(
     mut contexts: EguiContexts,
     mut menu: ResMut<MenuState>,
     mode: Res<GameMode>,
+    game_type: Res<crate::app_state::GameType>,
     mut scene_input: ResMut<SceneInput>,
     mut next: ResMut<NextState<AppState>>,
 ) -> Result {
@@ -117,7 +143,7 @@ fn scene_select_system(
         return Ok(());
     };
     let mut sel = menu.selected;
-    let action = menu_ui::draw_scene_select(ctx, &menu.scene_files, *mode, &mut sel);
+    let action = menu_ui::draw_scene_select(ctx, &menu.scene_files, *mode, *game_type, &mut sel);
     menu.selected = sel;
     match action {
         SceneAction::Load(path) => {
@@ -125,7 +151,7 @@ fn scene_select_system(
             scene_input.path = Some(path.to_string_lossy().into_owned());
             next.set(AppState::Loading);
         }
-        SceneAction::Back => next.set(AppState::ModeSelect),
+        SceneAction::Back => next.set(AppState::GameTypeSelect),
         SceneAction::None => {}
     }
     Ok(())
@@ -200,7 +226,8 @@ fn handle_esc(
     }
     match state.get() {
         AppState::ModeSelect => menu.show_exit = true,
-        AppState::SceneSelect => next.set(AppState::ModeSelect),
+        AppState::GameTypeSelect => next.set(AppState::ModeSelect),
+        AppState::SceneSelect => next.set(AppState::GameTypeSelect),
         // Placement: Esc backs straight out to the menu (matches native).
         AppState::Placement => next.set(AppState::ModeSelect),
         // Playing: close the settings panel if open, else open the exit dialog.

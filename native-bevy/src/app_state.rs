@@ -17,16 +17,18 @@ use bevy::prelude::*;
 /// Top-level application state. Drives which systems run (menus, loading, placement, flight).
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppState {
-    /// Choose single-player vs split-screen. (rich menu UI: later slice — Phase 8)
+    /// Choose single-player vs dual-player.
     #[default]
     ModeSelect,
-    /// Pick a `.ply` scene file. (rich menu UI: later slice — Phase 8)
+    /// Choose race vs battle game type.
+    GameTypeSelect,
+    /// Pick a `.ply` scene file.
     SceneSelect,
-    /// Background PLY load in progress (loading screen: later slice — Phase 1.4).
+    /// Background PLY load in progress.
     Loading,
-    /// Scene loaded; orbit camera to set spawn position / heading / world-up (Phase 1.5/1.6).
+    /// Scene loaded; orbit camera to set spawn position / heading / world-up.
     Placement,
-    /// Drone flight (Phase 4).
+    /// Drone flight.
     Playing,
 }
 
@@ -36,7 +38,16 @@ pub enum AppState {
 pub enum GameMode {
     #[default]
     SinglePlayer,
-    SplitScreen,
+    DualPlayer,
+}
+
+/// Game type: racing (existing physics) or battle (space-fighter, no gravity).
+/// Orthogonal to `GameMode` — combines with player count to select the activity.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Resource)]
+pub enum GameType {
+    #[default]
+    Race,
+    Battle,
 }
 
 /// World coordinate system (scene-dependent). Ported verbatim from `native/src/app_state.rs`.

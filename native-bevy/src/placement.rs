@@ -143,13 +143,14 @@ fn init_placement_orbit(mut commands: Commands, config: Res<CurrentSceneConfig>)
 }
 
 /// `OnEnter(Placement)`: build the scene (demo PBR objects + lighting + spawn marker) and spawn the
-/// camera(s) for the current `GameMode` (SinglePlayer = one full-window camera; SplitScreen = two
+/// camera(s) for the current `GameMode` (SinglePlayer = one full-window camera; DualPlayer = two
 /// stacked halves).
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mode: Res<GameMode>,
+    game_type: Res<crate::app_state::GameType>,
     config: Res<CurrentSceneConfig>,
     orbit: Res<OrbitState>,
     asset_server: Res<AssetServer>,
@@ -175,7 +176,7 @@ fn setup_scene(
     // (local +Y = heading, +Z = world up, +X = right); `flight::setup_flight` despawns it recursively.
     // Children depend on the mode:
     //   SinglePlayer: just the drone model on the spawn point (no arrow — the drone IS the marker).
-    //   SplitScreen:  the flat yellow heading arrow at the centre + a static drone at each player's
+    //   DualPlayer:  the flat yellow heading arrow at the centre + a static drone at each player's
     //     start (P1 left / P2 right along local X = the heading's "right", offset ±SPLIT_SPAWN_OFFSET
     //     so they sit exactly where `setup_flight` places the two flight drones).
     let drone_model = asset_server.load(GltfAssetLabel::Scene(0).from_asset(DRONE_MODEL_ASSET));
@@ -188,7 +189,7 @@ fn setup_scene(
             .with_scale(Vec3::splat(DRONE_MODEL_SCALE))
     };
     // Heading arrow (split-screen only): a flat unlit double-sided isosceles prism + its mesh.
-    let arrow = matches!(*mode, GameMode::SplitScreen).then(|| {
+    let arrow = matches!(*mode, GameMode::DualPlayer).then(|| {
         let mat = materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.95, 0.0), // dark / muted yellow
             unlit: true,
@@ -208,7 +209,7 @@ fn setup_scene(
             GameMode::SinglePlayer => {
                 p.spawn((SceneRoot(drone_model.clone()), drone_child(0.0)));
             }
-            GameMode::SplitScreen => {
+            GameMode::DualPlayer => {
                 let (mesh, mat) = arrow.clone().unwrap();
                 p.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::default()));
                 let d = crate::flight::SPLIT_SPAWN_OFFSET;
@@ -227,7 +228,7 @@ fn setup_scene(
     let cam_xf = orbit_camera_transform(&config.0, &orbit);
     let cams: &[(u8, isize)] = match *mode {
         GameMode::SinglePlayer => &[(0, 0)],
-        GameMode::SplitScreen => &[(0, 0), (1, 1)],
+        GameMode::DualPlayer => &[(0, 0), (1, 1)],
     };
     for &(index, order) in cams {
         // Layer 0 = shared (splat-driven meshes, the spawn marker). Camera i also sees layer i+1 (its
@@ -235,9 +236,14 @@ fn setup_scene(
         // additionally sees the OTHER player's in-flight drone layer (DRONE_VIS_LAYER_BASE + other), so
         // pilots see the opponent's aircraft but never their own FPV body.
         let mut layer_ids = vec![0usize, index as usize + 1];
-        if matches!(*mode, GameMode::SplitScreen) {
+        if matches!(*mode, GameMode::DualPlayer) {
             // also see the OTHER player's in-flight drone (player 1-index), never our own FPV body.
             layer_ids.push(crate::flight::DRONE_VIS_LAYER_BASE + (1 - index as usize));
+        }
+        // In battle mode, also render your OWN drone model (unlike race mode where FPV pilots
+        // shouldn't see their own body — battle mode needs visual feedback of the drone).
+        if matches!(*game_type, crate::app_state::GameType::Battle) {
+            layer_ids.push(crate::flight::DRONE_VIS_LAYER_BASE + index as usize);
         }
         let render_layers = RenderLayers::from_layers(&layer_ids);
         let mut cam = commands.spawn((
@@ -267,7 +273,7 @@ fn setup_scene(
             render_layers.clone(),
         ));
         // Only split-screen cameras get a viewport rect; the single-player camera stays full-window.
-        if matches!(*mode, GameMode::SplitScreen) {
+        if matches!(*mode, GameMode::DualPlayer) {
             cam.insert(SplitCamera { index });
         }
     }

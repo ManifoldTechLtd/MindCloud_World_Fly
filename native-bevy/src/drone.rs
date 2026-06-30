@@ -71,12 +71,18 @@ pub struct KeyState {
 }
 
 impl KeyState {
-    pub fn to_input(&self, armed: bool) -> DroneInput {
+    pub fn to_input(&self, armed: bool, battle_mode: bool) -> DroneInput {
         // Convention: right key = roll right = negative (body Z+ = roll left)
         DroneInput {
             roll: if self.right { -1. } else if self.left { 1. } else { 0. },
             pitch: if self.up { -1. } else if self.down { 1. } else { 0. },
-            throttle: if self.w { 0.5 } else if self.s { -1. } else { -0.2 },
+            // In battle mode, centered throttle = 0 (no thrust). In race mode, centered throttle
+            // = -0.2 (slight descent / hover assist for FPV).
+            throttle: if battle_mode {
+                if self.w { 1.0 } else if self.s { -1.0 } else { 0.0 }
+            } else {
+                if self.w { 0.5 } else if self.s { -1. } else { -0.2 }
+            },
             yaw: if self.d { 1. } else if self.a { -1. } else { 0. },
             armed, boost: false, rates: [1., 1., 1.],
         }
@@ -110,6 +116,10 @@ pub struct Drone {
 
     // ---- World coordinate system ----
     pub world_up: WorldUp,
+
+    /// When true, the drone uses battle-mode physics: no gravity, throttle = forward/backward
+    /// thrust along body +X (space-fighter style). Set externally from `GameType::Battle`.
+    pub battle_mode: bool,
 
     // ---- Tunable parameters ----
     pub flight_mode: FlightMode,
@@ -187,6 +197,7 @@ impl Drone {
             body_pitch: 0.0, body_roll: 0.0,
 
             world_up: WorldUp::Zup,
+            battle_mode: false,
 
             flight_mode: FlightMode::Fpv,
             prev_flight_mode: FlightMode::Fpv,
@@ -342,6 +353,9 @@ impl Drone {
         if !input.armed {
             self.update_disarmed(dt);
             self.fpv_pos_locked = true; // reset lock for next arm
+        } else if self.battle_mode {
+            self.control_battle(dt, input);
+            self.fpv_pos_locked = false;
         } else if self.flight_mode == FlightMode::Drone {
             self.control_drone(dt, input);
             self.fpv_pos_locked = false;
@@ -356,29 +370,41 @@ impl Drone {
         // Extract rotation matrix from orientation (q_bw: body→world).
         // Columns of Matrix3::from(q_bw) are body axes in world.
         let rot = Matrix3::from(self.orientation);
-        // Thrust direction = body -Z in world = -col2 = -rot.z
-        let thrust_dir = Vector3::new(-rot.z.x, -rot.z.y, -rot.z.z);
+        // Thrust direction depends on battle mode:
+        //   Normal (Fpv/Drone): body -Z (up) — thrust fights gravity
+        //   Battle:              body +X (forward) — no gravity, space-fighter style
+        let is_battle = self.battle_mode;
+        let thrust_dir = if is_battle {
+            // body +X (forward) in world = col0
+            Vector3::new(rot.x.x, rot.x.y, rot.x.z)
+        } else {
+            // body -Z (up) in world = -col2
+            Vector3::new(-rot.z.x, -rot.z.y, -rot.z.z)
+        };
 
         // Skip physics when position-locked (disarmed or FPV pre-throttle)
         let pos_frozen = !input.armed || self.fpv_pos_locked;
         if !pos_frozen {
-            // Forces: thrust along body -Z + gravity + quadratic drag
+            // Forces: thrust along thrust_dir + (gravity + drag for non-battle; reduced drag for battle)
             let mass_g = self.mass.max(1.0);
             let mass_kg = mass_g / 1000.0;
             let thrust_accel = (self.thrust_output / mass_g) * G;
             let mut ax = thrust_dir.x * thrust_accel;
             let mut ay = thrust_dir.y * thrust_accel;
             let mut az = thrust_dir.z * thrust_accel;
-            // Gravity along world down axis
-            match self.world_up {
-                WorldUp::Zup => { az -= G; }     // gravity = (0, 0, -G)
-                WorldUp::Colmap => { ay += G; }  // gravity = (0, +G, 0), +Y = down
+            // Gravity along world down axis (skipped in Battle mode — no gravity)
+            if !is_battle {
+                match self.world_up {
+                    WorldUp::Zup => { az -= G; }     // gravity = (0, 0, -G)
+                    WorldUp::Colmap => { ay += G; }  // gravity = (0, +G, 0), +Y = down
+                }
             }
 
-            // Quadratic drag
+            // Quadratic drag (reduced 10× in battle mode for space-like inertia)
             let spd = (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz).sqrt();
             if spd > 0.001 {
-                let drag_force = 0.5 * self.drag_cd * self.drag_area * AIR_DENSITY * spd * spd;
+                let drag_cd = if is_battle { self.drag_cd * 0.1 } else { self.drag_cd };
+                let drag_force = 0.5 * drag_cd * self.drag_area * AIR_DENSITY * spd * spd;
                 let drag_accel = drag_force / mass_kg;
                 ax -= (self.vx / spd) * drag_accel;
                 ay -= (self.vy / spd) * drag_accel;
@@ -464,6 +490,8 @@ impl Drone {
             FlightMode::Fpv => self.camera_mount_angle,
             FlightMode::Drone => self.camera_tilt_angle,
         };
+        // In battle mode, always use the FPV mount angle regardless of flight_mode.
+        let mount_deg = if self.battle_mode { self.camera_mount_angle } else { mount_deg };
         let mount_rad = mount_deg * DEG2RAD;
         // Negate: a right-handed rotation about body +Y pitches forward→down, so we flip the sign to
         // make a positive mount angle look up.
@@ -590,6 +618,51 @@ impl Drone {
             self.thrust_output = 0.0;
         } else {
             self.thrust_output = ((input.throttle + 1.0) * 0.5) * self.max_thrust * boost;
+        }
+    }
+
+    /// Battle mode: space-fighter, no gravity. Throttle controls forward/backward thrust along
+    /// body +X (forward). Roll/pitch/yaw are pure angular rate control (same as FPV).
+    fn control_battle(&mut self, dt: f32, input: &DroneInput) {
+        let boost = if input.boost { 1.5 } else { 1.0 };
+        let [rate_r, rate_p, rate_y] = input.rates;
+
+        // Sticks → target angular rates (deg/s) — same as FPV
+        let t_rr = input.roll * self.max_roll_rate * rate_r * boost;
+        let t_pr = input.pitch * self.max_pitch_rate * rate_p * boost;
+        let t_yr = input.yaw * self.max_yaw_rate * rate_y * boost;
+
+        // Smooth rate tracking
+        let s = 1.0 - (-15.0 * dt).exp();
+        self.roll_rate += (t_rr - self.roll_rate) * s;
+        self.pitch_rate += (t_pr - self.pitch_rate) * s;
+        self.yaw_rate += (t_yr - self.yaw_rate) * s;
+
+        // Damp when centered
+        let ad = (-self.angular_drag * dt).exp();
+        if input.roll.abs() < 0.05 { self.roll_rate *= ad; }
+        if input.pitch.abs() < 0.05 { self.pitch_rate *= ad; }
+        if input.yaw.abs() < 0.05 { self.yaw_rate *= ad; }
+
+        // Quaternion rate integration: ω in body NED frame (rad/s)
+        let omega_x = self.roll_rate * DEG2RAD;
+        let omega_y = self.pitch_rate * DEG2RAD;
+        let omega_z = self.yaw_rate * DEG2RAD;
+        self.integrate_orientation(omega_x, omega_y, omega_z, dt);
+
+        // Throttle → forward/backward thrust (grams-force, signed).
+        // input.throttle: -1..1, where +1 = full forward, -1 = full reverse, 0 = no thrust.
+        // The sign is preserved so the force integration in update() applies it along body +X
+        // (forward) when positive, or body -X (reverse) when negative.
+        self.thrust_output = input.throttle * self.max_thrust * boost;
+
+        // When no throttle is applied, strongly damp velocity so the drone stops quickly
+        // (arcade-style: release = stay in place, not space-inertia drift).
+        if input.throttle.abs() < 0.05 {
+            let damp = (-12.0 * dt).exp(); // ~90% per frame at 60fps
+            self.vx *= damp;
+            self.vy *= damp;
+            self.vz *= damp;
         }
     }
 

@@ -132,24 +132,28 @@ impl Plugin for FlightPlugin {
 /// marker. The orbit cameras persist; `placement_orbit_system` stops (run_if Placement) and
 /// `drone_camera_system` now drives their transforms as FPV cameras (one per `SplitCamera`).
 ///
-/// SinglePlayer = 1 drone (disarmed). SplitScreen = 2 drones started abreast — offset left (P1) and
+/// SinglePlayer = 1 drone (disarmed). DualPlayer = 2 drones started abreast — offset left (P1) and
 /// right (P2) along the heading's perpendicular so they're side by side and equidistant to a gate
 /// dead ahead — both armed at start.
 fn setup_flight(
     mut commands: Commands,
     config: Res<CurrentSceneConfig>,
     mode: Res<GameMode>,
+    game_type: Res<crate::app_state::GameType>,
     markers: Query<Entity, With<SpawnMarker>>,
     asset_server: Res<AssetServer>,
 ) {
     let s = config.0.spawn;
+    let is_battle = *game_type == crate::app_state::GameType::Battle;
     let make = |offset: Vec3| -> Drone {
         let mut drone = Drone::new();
         drone.world_up = config.0.world_up;
         drone.spawn_heading = config.0.heading_deg;
+        drone.battle_mode = is_battle;
         persistence::load_drone_settings(&mut drone);
         drone.reset(s[0] + offset.x, s[1] + offset.y, s[2] + offset.z);
         // Stabilized (Drone) mode is far easier to fly on a keyboard than FPV acro; default to it.
+        // In battle mode the flight_mode is irrelevant (battle physics override), but Drone is fine.
         drone.flight_mode = FlightMode::Drone;
         drone
     };
@@ -160,7 +164,7 @@ fn setup_flight(
             keys: KeyState::default(),
             armed: false,
         }],
-        GameMode::SplitScreen => {
+        GameMode::DualPlayer => {
             // Start the drones abreast: offset along the heading's perpendicular ("right") axis so
             // they're side by side and equidistant to a gate dead ahead. P1 = left, P2 = right.
             // right = fwd rotated -90° on the horizontal plane (Zup fwd=(sin h,cos h,0); Colmap
@@ -187,7 +191,7 @@ fn setup_flight(
     // Split-screen is a race: drones stay pinned at spawn until P starts the 3-2-1 countdown.
     // Single-player is free flight (no countdown / no lock).
     commands.insert_resource(match *mode {
-        GameMode::SplitScreen => RaceState::Ready,
+        GameMode::DualPlayer => RaceState::Ready,
         GameMode::SinglePlayer => RaceState::Racing { go_flash: 0.0 },
     });
     // The placement spawn marker is not shown during flight; instead each player gets a drone model
@@ -261,7 +265,7 @@ fn drone_input_system(
             p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
             info!("[P1] flight mode = {:?}", p.drone.flight_mode);
         }
-        let kbd = p.keys.to_input(p.armed);
+        let kbd = p.keys.to_input(p.armed, p.drone.battle_mode);
         let c = ctrl.as_deref_mut().map(|c| &mut c.0[0]);
         drive_player(p, c, kbd, "P1", dt, octree, locked);
     }
@@ -289,7 +293,7 @@ fn drone_input_system(
             p.drone.flight_mode = toggle_mode(p.drone.flight_mode);
             info!("[P2] flight mode = {:?}", p.drone.flight_mode);
         }
-        let kbd = p.keys.to_input(p.armed);
+        let kbd = p.keys.to_input(p.armed, p.drone.battle_mode);
         let c = ctrl.as_deref_mut().map(|c| &mut c.0[1]);
         drive_player(p, c, kbd, "P2", dt, octree, locked);
     }

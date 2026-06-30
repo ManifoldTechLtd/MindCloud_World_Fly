@@ -157,13 +157,13 @@ fn ensure_gates_built(
     course.visible = true;
     // Dual (split) races are linear: clock from GO, finish on the last gate. Single-player keeps
     // lap racing (clock from the first gate-0 crossing, laps loop forever).
-    course.linear = matches!(*mode, GameMode::SplitScreen);
+    course.linear = matches!(*mode, GameMode::DualPlayer);
 
     let n = course.gates.len();
     // One independent progress tracker per player (identical geometry, separate pass/lap state).
     let n_players = match *mode {
         GameMode::SinglePlayer => 1,
-        GameMode::SplitScreen => 2,
+        GameMode::DualPlayer => 2,
     };
     let race = RaceCourse { players: vec![course; n_players] };
     spawn_gate_visuals(&mut commands, &mut meshes, &mut materials, &mut images, &race);

@@ -31,7 +31,7 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy_egui::EguiPlugin;
 use clap::Parser;
 
-use app_state::{AppState, GameMode, WorldUp};
+use app_state::{AppState, GameMode, GameType, WorldUp};
 use audio::AudioPlugin;
 use flight::FlightPlugin;
 use gate_editor::GateEditorPlugin;
@@ -56,6 +56,10 @@ struct Args {
     /// Split-screen (two players). Default is single-player (one full-window view).
     #[arg(long)]
     split: bool,
+
+    /// Battle mode (space-fighter physics). Default is race mode.
+    #[arg(long)]
+    battle: bool,
 
     /// World up convention: `zup` (default) or `colmap` (Y-down). Overrides the per-scene config.
     #[arg(long, value_name = "zup|colmap")]
@@ -96,10 +100,12 @@ fn main() {
 
     // Game mode + initial state. With `--input` we skip the menus and jump straight to Loading
     // (using the CLI `--split` mode); without it we start at the ModeSelect menu.
-    let mode = if args.split { GameMode::SplitScreen } else { GameMode::SinglePlayer };
+    let mode = if args.split { GameMode::DualPlayer } else { GameMode::SinglePlayer };
+    let game_type = if args.battle { GameType::Battle } else { GameType::Race };
     let initial = if args.input.is_some() { AppState::Loading } else { AppState::ModeSelect };
     let world_up_override = args.world_up.as_deref().map(WorldUp::parse);
     app.insert_resource(mode);
+    app.insert_resource(game_type);
     app.insert_resource(SceneInput { path: args.input, world_up_override });
     app.insert_state(initial);
 

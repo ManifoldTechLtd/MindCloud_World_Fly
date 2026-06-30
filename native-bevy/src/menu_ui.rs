@@ -7,7 +7,7 @@
 //!    (the Bevy systems translate these into `NextState` + resource writes),
 //!  - the "Browse for file…" button (native `rfd` dialog) is dropped for now (rfd not a dep yet).
 
-use crate::app_state::GameMode;
+use crate::app_state::{GameMode, GameType};
 use bevy_egui::egui::{self, Color32, RichText, Vec2};
 use std::path::PathBuf;
 
@@ -15,6 +15,13 @@ use std::path::PathBuf;
 pub enum ModeAction {
     None,
     Select(GameMode),
+}
+
+/// Game-type-select result.
+pub enum GameTypeAction {
+    None,
+    Select(GameType),
+    Back,
 }
 
 /// Scene-select result.
@@ -59,9 +66,9 @@ pub fn draw_mode_select(ctx: &egui::Context) -> ModeAction {
                 }
                 ui.add_space(12.0);
                 if ui.add_sized(btn_size, egui::Button::new(
-                    RichText::new("Split Screen (2 Players)").size(18.0).color(Color32::WHITE)
+                    RichText::new("Dual Player").size(18.0).color(Color32::WHITE)
                 ).fill(Color32::from_rgb(40, 80, 60))).clicked() {
-                    action = ModeAction::Select(GameMode::SplitScreen);
+                    action = ModeAction::Select(GameMode::DualPlayer);
                 }
 
                 ui.add_space(40.0);
@@ -72,10 +79,52 @@ pub fn draw_mode_select(ctx: &egui::Context) -> ModeAction {
     action
 }
 
+/// Draw game type selection screen (Race vs Battle).
+pub fn draw_game_type_select(ctx: &egui::Context, mode: GameMode) -> GameTypeAction {
+    let mut action = GameTypeAction::None;
+    let mode_label = match mode { GameMode::SinglePlayer => "Single Player", GameMode::DualPlayer => "Dual Player" };
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 18, 28)))
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.label(RichText::new("Select Game Type")
+                    .size(28.0).color(Color32::from_rgb(66, 114, 245)).strong());
+                ui.add_space(5.0);
+                ui.label(RichText::new(format!("Mode: {}", mode_label))
+                    .size(13.0).color(Color32::from_rgb(100, 200, 150)));
+                ui.add_space(30.0);
+
+                let btn_size = Vec2::new(280.0, 50.0);
+
+                if ui.add_sized(btn_size, egui::Button::new(
+                    RichText::new("Race").size(18.0).color(Color32::WHITE)
+                ).fill(Color32::from_rgb(40, 60, 100))).clicked() {
+                    action = GameTypeAction::Select(GameType::Race);
+                }
+                ui.add_space(12.0);
+                if ui.add_sized(btn_size, egui::Button::new(
+                    RichText::new("Battle").size(18.0).color(Color32::WHITE)
+                ).fill(Color32::from_rgb(100, 40, 60))).clicked() {
+                    action = GameTypeAction::Select(GameType::Battle);
+                }
+
+                ui.add_space(40.0);
+                if ui.button(RichText::new("< Back to Mode Select").size(12.0).color(Color32::from_rgb(150, 150, 180))).clicked() {
+                    action = GameTypeAction::Back;
+                }
+            });
+        });
+
+    action
+}
+
 /// Draw scene selection screen. `selected` is the index of the highlighted scene.
-pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: GameMode, selected: &mut Option<usize>) -> SceneAction {
+pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: GameMode, game_type: GameType, selected: &mut Option<usize>) -> SceneAction {
     let mut action = SceneAction::None;
-    let mode_label = match mode { GameMode::SinglePlayer => "Single Player", GameMode::SplitScreen => "Split Screen" };
+    let mode_label = match mode { GameMode::SinglePlayer => "Single Player", GameMode::DualPlayer => "Dual Player" };
+    let type_label = match game_type { GameType::Race => "Race", GameType::Battle => "Battle" };
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 18, 28)))
@@ -84,7 +133,7 @@ pub fn draw_scene_select(ctx: &egui::Context, scene_files: &[PathBuf], mode: Gam
                 ui.add_space(30.0);
                 ui.label(RichText::new("Select Scene").size(28.0).color(Color32::from_rgb(66, 114, 245)).strong());
                 ui.add_space(5.0);
-                ui.label(RichText::new(format!("Mode: {}", mode_label)).size(13.0).color(Color32::from_rgb(100, 200, 150)));
+                ui.label(RichText::new(format!("{} · {}", mode_label, type_label)).size(13.0).color(Color32::from_rgb(100, 200, 150)));
                 ui.add_space(20.0);
 
                 if scene_files.is_empty() {

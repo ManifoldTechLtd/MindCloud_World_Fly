@@ -96,6 +96,8 @@ pub fn draw_hud(
                         FlightMode::Fpv => "FPV",
                         FlightMode::Drone => "DRONE",
                     };
+                    // Battle mode overrides the label since flight_mode is irrelevant then.
+                    let mode = if drone.battle_mode { "BATTLE" } else { mode };
                     let arm_c = if armed { GREEN } else { WARN };
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(mode).color(Color32::WHITE).size(12.0).strong());
