@@ -7,6 +7,8 @@
 
 mod app_state;
 mod audio;
+mod battle;
+mod battle_plugin;
 mod collision;
 mod drone;
 mod flight;
@@ -33,6 +35,7 @@ use clap::Parser;
 
 use app_state::{AppState, GameMode, GameType, WorldUp};
 use audio::AudioPlugin;
+use battle_plugin::BattlePlugin;
 use flight::FlightPlugin;
 use gate_editor::GateEditorPlugin;
 use gate_plugin::GatePlugin;
@@ -115,7 +118,7 @@ fn main() {
     //  - PlacementPlugin: scene build, world-up-aware orbit camera, spawn/heading editing overlay.
     //  - FlightPlugin:    the player drone (keyboard/HID → physics → camera).
     //  - InputPlugin:     HID RC-transmitter reader + Controller resource (drives P1 when connected).
-    app.add_plugins((MenuPlugin, ScenePlugin, PlacementPlugin, FlightPlugin, GatePlugin, GateEditorPlugin, InputPlugin, AudioPlugin));
+    app.add_plugins((MenuPlugin, ScenePlugin, PlacementPlugin, FlightPlugin, GatePlugin, GateEditorPlugin, InputPlugin, AudioPlugin, BattlePlugin));
 
     app.run();
 }
