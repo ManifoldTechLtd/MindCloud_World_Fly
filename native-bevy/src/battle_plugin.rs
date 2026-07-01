@@ -7,10 +7,11 @@
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
+use bevy_egui::egui;
 use cgmath::Matrix3;
 
 use crate::app_state::{AppState, GameType};
-use crate::battle::{BattleState, WeaponState};
+use crate::battle::{BattleState, Health, WeaponState};
 use crate::flight::Players;
 use crate::scene::SceneEntity;
 use crate::splat_plugin::SplatScene;
@@ -33,8 +34,15 @@ impl Plugin for BattlePlugin {
                 battle_fire_system,
                 battle_projectile_physics_system,
                 battle_visual_sync_system,
+                battle_reset_system,
             )
                 .chain()
+                .run_if(in_state(AppState::Playing))
+                .run_if(resource_exists::<BattleState>),
+        );
+        app.add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            battle_finish_overlay_system
                 .run_if(in_state(AppState::Playing))
                 .run_if(resource_exists::<BattleState>),
         );
@@ -78,10 +86,13 @@ fn battle_fire_system(
     if settings_open.0 || menu.show_exit {
         return;
     }
-    // Lazy-init: ensure we have one weapon per player.
+    // Lazy-init: ensure we have one weapon + health per player.
     if battle.weapons.len() < players.0.len() {
         battle.weapons.resize_with(players.0.len(), WeaponState::default);
-        info!("[Battle] initialized {} weapon(s)", players.0.len());
+        while battle.player_health.len() < players.0.len() {
+            battle.player_health.push(Health::new(100.0));
+        }
+        info!("[Battle] initialized {} weapon(s) + health", players.0.len());
     }
     let fire_keys = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
     for (i, p) in players.0.iter().enumerate() {
@@ -104,18 +115,45 @@ fn battle_fire_system(
     }
 }
 
-/// Step projectile physics + remove expired/collided ones.
+/// Step projectile physics + remove expired/collided ones, then check hits.
 fn battle_projectile_physics_system(
     time: Res<Time>,
     splat: Res<SplatScene>,
     mut battle: ResMut<BattleState>,
+    players: Res<Players>,
 ) {
+    if battle.winner.is_some() {
+        return; // match over — freeze projectiles
+    }
     let dt = time.delta_secs();
     battle.tick_cooldowns(dt);
     let octree = splat.collision_octree.as_ref();
     let to_remove = battle.update_projectiles(dt, octree);
     if !to_remove.is_empty() {
         battle.remove_projectiles(&to_remove);
+    }
+    // Check projectile-vs-drone hits.
+    let drone_positions: Vec<(cgmath::Vector3<f32>, f32)> = players.0.iter()
+        .map(|p| {
+            (cgmath::Vector3::new(p.drone.x, p.drone.y, p.drone.z), p.drone.collision_radius)
+        })
+        .collect();
+    let (hit_remove, events) = battle.check_hits(&drone_positions);
+    if !hit_remove.is_empty() {
+        battle.remove_projectiles(&hit_remove);
+    }
+    for ev in &events {
+        let killed = battle.apply_hit(ev);
+        if killed {
+            let killer = ev.killer.map(|k| format!("P{}", k + 1)).unwrap_or_else(|| "NPC".into());
+            info!("[Battle] P{} killed by {}", ev.target_player + 1, killer);
+        } else {
+            info!("[Battle] P{} hit for {} damage", ev.target_player + 1, ev.damage);
+        }
+    }
+    battle.check_win_condition();
+    if let Some(crate::battle::BattleWinner::Player(winner)) = battle.winner {
+        info!("[Battle] MATCH OVER — P{} WINS!", winner + 1);
     }
 }
 
@@ -171,4 +209,121 @@ struct BeamMatRes(Handle<StandardMaterial>);
 /// with Vec3::Y as the forward reference.
 fn build_beam_mesh(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
     meshes.add(Cylinder::new(0.05, 1.0))
+}
+
+/// Handle R-reset in battle mode: reset health, clear projectiles, clear winner.
+fn battle_reset_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut battle: ResMut<BattleState>,
+) {
+    if !keys.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+    // Reset all player health to full.
+    for h in &mut battle.player_health {
+        h.current = h.max;
+    }
+    // Clear projectiles + winner.
+    battle.projectiles.clear();
+    battle.winner = None;
+    info!("[Battle] reset — all health restored, match restarted");
+}
+
+/// Battle finish overlay: when `battle.winner` is set, show VICTORY/DEFEATED to each player.
+fn battle_finish_overlay_system(
+    mut contexts: bevy_egui::EguiContexts,
+    battle: Res<BattleState>,
+    players: Res<Players>,
+    windows: Query<&Window>,
+) -> Result {
+    let Some(winner) = battle.winner else {
+        return Ok(());
+    };
+    if players.0.is_empty() {
+        return Ok(());
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    let Ok(win) = windows.single() else {
+        return Ok(());
+    };
+    let (w, h) = (win.width(), win.height());
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("battle_finish"),
+    ));
+    let winner_idx = match winner {
+        crate::battle::BattleWinner::Player(i) => i,
+    };
+
+    if players.0.len() <= 1 {
+        // Single player: just show result.
+        let (text, color) = if winner_idx == 0 {
+            ("VICTORY", egui::Color32::from_rgb(90, 230, 120))
+        } else {
+            ("DEFEATED", egui::Color32::from_rgb(255, 80, 80))
+        };
+        let curtain = egui::Color32::from_black_alpha(190);
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)),
+            0.0,
+            curtain,
+        );
+        painter.text(
+            egui::pos2(w * 0.5, h * 0.5 - 20.0),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(60.0),
+            color,
+        );
+        painter.text(
+            egui::pos2(w * 0.5, h * 0.5 + 40.0),
+            egui::Align2::CENTER_CENTER,
+            "press  R  to restart",
+            egui::FontId::proportional(16.0),
+            egui::Color32::from_gray(170),
+        );
+    } else {
+        // Dual player: show VICTORY/DEFEATED per half.
+        let half = h * 0.5;
+        let curtain = egui::Color32::from_black_alpha(190);
+        for i in 0..2 {
+            let top = half * i as f32;
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, top),
+                egui::vec2(w, half),
+            );
+            painter.rect_filled(rect, 0.0, curtain);
+            let (text, color) = if i == winner_idx {
+                ("VICTORY", egui::Color32::from_rgb(255, 215, 70))
+            } else {
+                ("DEFEATED", egui::Color32::from_rgb(180, 180, 190))
+            };
+            let cx = w * 0.5;
+            let cy = top + half * 0.5;
+            painter.text(
+                egui::pos2(cx, cy - 20.0),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(50.0),
+                egui::Color32::WHITE,
+            );
+            painter.text(
+                egui::pos2(cx, cy + 30.0),
+                egui::Align2::CENTER_CENTER,
+                format!("P{} {}", i + 1, if i == winner_idx { "WINS" } else { "LOST" }),
+                egui::FontId::proportional(36.0),
+                color,
+            );
+            painter.text(
+                egui::pos2(cx, cy + 70.0),
+                egui::Align2::CENTER_CENTER,
+                "press  R  to restart",
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_gray(170),
+            );
+        }
+    }
+    Ok(())
 }

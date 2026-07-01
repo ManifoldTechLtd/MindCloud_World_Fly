@@ -113,6 +113,7 @@ fn ensure_gates_built(
     config: Option<Res<CurrentSceneConfig>>,
     splat: Res<SplatScene>,
     mode: Res<GameMode>,
+    game_type: Res<crate::app_state::GameType>,
 ) {
     if existing.is_some() {
         return;
@@ -120,6 +121,10 @@ fn ensure_gates_built(
     let Some(config) = config else {
         return;
     };
+    // Skip gate course in battle mode — no racing gates needed.
+    if *game_type == crate::app_state::GameType::Battle {
+        return;
+    }
 
     let world_up = world_up_vec(config.0.world_up);
     let record = splat
