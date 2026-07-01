@@ -269,6 +269,7 @@ export class GateCourse {
         this.lapStart      = null;   // ms timestamp when gate 0 was last crossed cleanly
         this.lapCount      = 0;      // completed laps this session
         this.bestLapMs     = null;   // best lap this session OR loaded from disk
+        this.lastLapMs     = null;   // most recent completed-lap time (for HUD)
         this.currentLapMs  = 0;      // live for HUD
 
         // Callbacks wired by main.js.
@@ -867,6 +868,7 @@ export class GateCourse {
                     this.bestLapMs = lapMs;
                     isBest = true;
                 }
+                this.lastLapMs = lapMs;
                 this._notifyLap(lapMs, isBest);
             }
             // Fresh lap in both cases: clear pass flags, restart timer.
@@ -1011,6 +1013,7 @@ export class GateCourse {
         this.lapStart      = null;
         this.currentLapMs  = 0;
         this.lapCount      = 0;
+        this.lastLapMs     = null;
         // bestLapMs intentionally preserved — survives scene-exit so
         // the persisted record isn't clobbered by a transient destroy().
     }

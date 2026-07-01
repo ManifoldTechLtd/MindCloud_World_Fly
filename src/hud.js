@@ -68,6 +68,7 @@ export class HUD {
         this.racePanelEl     = document.getElementById('hud-race-panel');
         this.hrpLapTimeEl    = document.getElementById('hrp-lap-time');
         this.hrpBestTimeEl   = document.getElementById('hrp-best-time');
+        this.hrpLastTimeEl   = document.getElementById('hrp-last-time');
         this.hrpGateProgEl   = document.getElementById('hrp-gate-progress');
 
         // FPS tracking
@@ -208,6 +209,20 @@ export class HUD {
                     } else {
                         this.hrpBestTimeEl.innerHTML = _monoDigits('--:--.---');
                         this.hrpBestTimeEl.classList.add('empty');
+                    }
+                }
+
+                // Last completed lap — green readout. Same placeholder
+                // treatment as BEST so the row geometry is stable before
+                // the first lap finishes.
+                const lastMs = gateCourse.lastLapMs;
+                if (this.hrpLastTimeEl) {
+                    if (lastMs != null) {
+                        this.hrpLastTimeEl.innerHTML = _monoDigits(formatLap(lastMs));
+                        this.hrpLastTimeEl.classList.remove('empty');
+                    } else {
+                        this.hrpLastTimeEl.innerHTML = _monoDigits('--:--.---');
+                        this.hrpLastTimeEl.classList.add('empty');
                     }
                 }
 

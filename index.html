@@ -282,6 +282,17 @@
             font-variant-numeric: tabular-nums;
         }
         .hrp-best-time.empty { color: #556; text-shadow: none; }
+        .hrp-last-time {
+            font-family: var(--race-font-family);
+            font-weight:  var(--race-font-weight);
+            font-style:   var(--race-font-style);
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            color: #7ec8a0;
+            text-shadow: 0 0 4px rgba(126, 200, 160, 0.40);
+            font-variant-numeric: tabular-nums;
+        }
+        .hrp-last-time.empty { color: #556; text-shadow: none; }
 
         /* ------------------------------------------------------------
          * Fixed-width character slots for the race-panel readouts.
@@ -542,6 +553,10 @@
             <div class="hrp-row">
                 <span class="hrp-label">BEST</span>
                 <span class="hrp-best-time empty" id="hrp-best-time">--:--.---</span>
+            </div>
+            <div class="hrp-row">
+                <span class="hrp-label">LAST</span>
+                <span class="hrp-last-time empty" id="hrp-last-time">--:--.---</span>
             </div>
         </div>
         <div id="hud-bottom-left">
