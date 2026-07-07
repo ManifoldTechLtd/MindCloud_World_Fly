@@ -91,7 +91,34 @@ Two ready-to-fly demo scenes are available on Google Drive. Both were captured u
 2. **Drag and drop** a `.ply`, `.splat`, or `.sog` file onto the page, or click **Choose File**
 3. Wait for parsing and engine initialization (progress shown on screen)
 
-### Step 2: Filter the Scene
+### Step 2: Select Up Axis
+
+After the file is loaded, you will be taken to the **Filter** stage. Before adjusting any sliders, set the **Up Axis** dropdown (bottom-right of the filter bar) to match your scene's coordinate system.
+
+<p align="center">
+  <img src="image.png" alt="Filter bar showing Up Axis dropdown set to Y-Up" width="100%">
+</p>
+
+- If you **know** your file's coordinate system, select it directly:
+  - Choose **Y-Up** for scenes built with a Y-up convention (e.g. most `.sog` files and many photogrammetry pipelines).
+  - Choose **Z-Up** for scenes built with a Z-up convention (e.g. outdoor LiDAR captures, some 3DGS reconstruction tools).
+
+- If you are **unsure**, you can determine the correct axis by trial:
+  1. Select either **Y-Up** or **Z-Up**, then click **Apply**.
+  2. You will enter **Placement Mode**. Press the movement keys and observe the drone's response against the on-screen guide:
+
+     | Key | Expected action |
+     |-----|-----------------|
+     | W / S | Move drone **Forward / Back** |
+     | A / D | Move drone **Left / Right** |
+     | Q / E | Move drone **Down / Up** |
+
+  3. If the drone moves in the directions shown above, the Up Axis is **correct**.
+  4. If the drone moves in unexpected directions (e.g. W moves it sideways instead of forward), press **Esc** to return to the scene loader and reload the file with the **opposite** Up Axis setting.
+
+> **Tip:** For `.sog` files, the Up Axis is automatically set to **Y-Up** and the dropdown is hidden — no action is needed.
+
+### Step 3: Filter the Scene
 
 After loading, you enter the **Filter** stage with an orbit camera view of the full scene:
 
@@ -108,7 +135,7 @@ Click **Apply** when satisfied. The chosen coordinate system is locked and shown
 
 > **Tip:** If the scene appears sideways or upside down, you likely have the wrong Up Axis. Press **Esc** to exit and reload the file with the correct setting.
 
-### Step 3: Place the Drone
+### Step 4: Place the Drone
 
 After filtering, you enter **Placement Mode**:
 
@@ -124,7 +151,7 @@ After filtering, you enter **Placement Mode**:
 
 A blue marker shows the drone's spawn position. The camera orbits around it as you move.
 
-### Step 4: Fly
+### Step 5: Fly
 
 Press **Enter** to confirm placement. The view switches to the drone's onboard camera.
 
