@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use cgmath::Matrix3;
 
-use crate::app_state::{AppState, GameType};
+use crate::app_state::{AppState, CurrentSceneConfig, GameType, WorldUp};
 use crate::battle::{BattleState, Health, WeaponState};
 use crate::flight::Players;
 use crate::scene::SceneEntity;
@@ -18,6 +18,17 @@ use crate::splat_plugin::SplatScene;
 
 /// RenderLayers for projectiles: visible to all cameras (layer 0 = shared).
 const PROJECTILE_LAYER: usize = 0;
+
+/// Muzzle offset below the camera/screen centre (m, along body +Z = down): the shot spawns
+/// slightly under the view centre so the tracer is visible leaving the screen.
+const MUZZLE_DROP: f32 = 0.2;
+
+/// Fixed battle hit-sphere radius per drone (m). Intentionally generous (vs the tunable
+/// physics `collision_radius`) so shots connect more often; scene collision is unaffected.
+const BATTLE_HIT_RADIUS: f32 = 0.3;
+
+/// Gravitational acceleration applied to projectiles (m/s²) — ballistic drop.
+const PROJECTILE_G: f32 = 9.81;
 
 /// Marker for projectile visual entities (all despawned + respawned each frame).
 #[derive(Component)]
@@ -61,11 +72,11 @@ fn setup_battle(
         return;
     }
     commands.insert_resource(BattleState::default());
-    // Cache the beam mesh + material so we don't rebuild per projectile.
-    let mesh = build_beam_mesh(&mut meshes);
+    // Cache the projectile mesh + material so we don't rebuild per shot.
+    let mesh = build_projectile_mesh(&mut meshes);
     let mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.1, 0.1),
-        emissive: Color::srgb(0.8, 0.0, 0.0).into(),
+        base_color: Color::srgb(0.2, 1.0, 0.3),
+        emissive: Color::srgb(0.0, 0.8, 0.2).into(),
         unlit: true,
         ..default()
     });
@@ -105,22 +116,27 @@ fn battle_fire_system(
         let d = &p.drone;
         let rot = Matrix3::from(d.orientation);
         let forward = cgmath::Vector3::new(rot.x.x, rot.x.y, rot.x.z);
+        // Body +Z = down (NED). The muzzle sits MUZZLE_DROP below the camera/screen centre so the
+        // tracer is visible as it leaves the view instead of spawning at the exact eye point.
+        let down = cgmath::Vector3::new(rot.z.x, rot.z.y, rot.z.z);
         let half_size = d.drone_size * 0.5;
-        let nose_pos = cgmath::Vector3::new(
-            d.x + forward.x * half_size,
-            d.y + forward.y * half_size,
-            d.z + forward.z * half_size,
+        let muzzle_pos = cgmath::Vector3::new(
+            d.x + forward.x * half_size + down.x * MUZZLE_DROP,
+            d.y + forward.y * half_size + down.y * MUZZLE_DROP,
+            d.z + forward.z * half_size + down.z * MUZZLE_DROP,
         );
-        battle.try_fire(i, nose_pos, forward);
+        battle.try_fire(i, muzzle_pos, forward);
     }
 }
 
-/// Step projectile physics + remove expired/collided ones, then check hits.
+/// Step projectile physics (ballistic, world-up-aware gravity) + remove expired/collided
+/// ones, then check hits against the fixed battle hit spheres.
 fn battle_projectile_physics_system(
     time: Res<Time>,
     splat: Res<SplatScene>,
     mut battle: ResMut<BattleState>,
     players: Res<Players>,
+    config: Res<CurrentSceneConfig>,
 ) {
     if battle.winner.is_some() {
         return; // match over — freeze projectiles
@@ -128,14 +144,20 @@ fn battle_projectile_physics_system(
     let dt = time.delta_secs();
     battle.tick_cooldowns(dt);
     let octree = splat.collision_octree.as_ref();
-    let to_remove = battle.update_projectiles(dt, octree);
+    // World-frame gravity for the ballistic arc (Zup: -Z is down; Colmap: +Y is down).
+    let gravity = match config.0.world_up {
+        WorldUp::Zup => cgmath::Vector3::new(0.0, 0.0, -PROJECTILE_G),
+        WorldUp::Colmap => cgmath::Vector3::new(0.0, PROJECTILE_G, 0.0),
+    };
+    let to_remove = battle.update_projectiles(dt, gravity, octree);
     if !to_remove.is_empty() {
         battle.remove_projectiles(&to_remove);
     }
-    // Check projectile-vs-drone hits.
+    // Check projectile-vs-drone hits with the FIXED battle hit radius (not the tunable
+    // physics collision_radius) so hit probability stays consistent.
     let drone_positions: Vec<(cgmath::Vector3<f32>, f32)> = players.0.iter()
         .map(|p| {
-            (cgmath::Vector3::new(p.drone.x, p.drone.y, p.drone.z), p.drone.collision_radius)
+            (cgmath::Vector3::new(p.drone.x, p.drone.y, p.drone.z), BATTLE_HIT_RADIUS)
         })
         .collect();
     let (hit_remove, events) = battle.check_hits(&drone_positions);
@@ -175,19 +197,13 @@ fn battle_visual_sync_system(
         return;
     };
 
-    // Spawn one visual per live projectile.
+    // Spawn one visual per live projectile. Spheres are orientation-free — no velocity
+    // alignment needed (the old cylinder beam aligned its Y axis to the velocity here).
     for p in &battle.projectiles {
-        let vel = Vec3::new(p.vel.x, p.vel.y, p.vel.z);
-        let rot = if vel.length_squared() > 0.001 {
-            Quat::from_rotation_arc(Vec3::Y, vel.normalize())
-        } else {
-            Quat::IDENTITY
-        };
         commands.spawn((
             Mesh3d(beam_mesh.0.clone()),
             MeshMaterial3d(beam_mat.0.clone()),
-            Transform::from_translation(Vec3::new(p.pos.x, p.pos.y, p.pos.z))
-                .with_rotation(rot),
+            Transform::from_translation(Vec3::new(p.pos.x, p.pos.y, p.pos.z)),
             Visibility::default(),
             ProjectileVisual,
             RenderLayers::layer(PROJECTILE_LAYER),
@@ -196,19 +212,18 @@ fn battle_visual_sync_system(
     }
 }
 
-/// Cached beam mesh handle (built once at setup_battle, reused for all projectiles).
+/// Cached projectile mesh handle (built once at setup_battle, reused for all shots).
 #[derive(Resource)]
 struct BeamMeshRes(Handle<Mesh>);
 
-/// Cached beam material handle (cyan, unlit, emissive).
+/// Cached projectile material handle (green tracer, unlit, emissive).
 #[derive(Resource)]
 struct BeamMatRes(Handle<StandardMaterial>);
 
-/// Build the beam mesh (cylinder: radius 0.05, height 1.0, local Y = travel axis).
-/// Bevy's Cylinder is oriented along Y, so the visual sync uses from_rotation_arc
-/// with Vec3::Y as the forward reference.
-fn build_beam_mesh(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
-    meshes.add(Cylinder::new(0.05, 1.0))
+/// Build the projectile mesh: a small green ball (radius 0.1 m). Replaced the earlier
+/// red cylinder beam — spheres need no orientation and read cleanly as ballistic tracers.
+fn build_projectile_mesh(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    meshes.add(Sphere::new(0.1))
 }
 
 /// Handle R-reset in battle mode: reset health, clear projectiles, clear winner.

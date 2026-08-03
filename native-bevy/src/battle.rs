@@ -14,11 +14,12 @@ pub enum ProjectileOwner {
     Npc,
 }
 
-/// A flying beam projectile. Visualized as a stretched ellipsoid by the plugin.
+/// A flying projectile (green tracer ball). Ballistic: gravity is applied per-tick
+/// in `update_projectiles`, so shots arc downward over distance.
 #[derive(Clone, Debug)]
 pub struct Projectile {
     pub pos: Vector3<f32>,
-    /// Constant velocity (direction × speed). No gravity.
+    /// Velocity (initial = direction × speed); gravity bends it down each tick.
     pub vel: Vector3<f32>,
     pub owner: ProjectileOwner,
     /// Seconds remaining before auto-despawn.
@@ -94,15 +95,19 @@ pub struct BattleState {
 }
 
 impl BattleState {
-    /// Advance projectile physics: move, check lifetime, check octree collision.
-    /// Returns indices of projectiles to remove (expired or collided).
+    /// Advance projectile physics: apply gravity, move, check lifetime, check octree collision.
+    /// `gravity` is the world-frame gravitational acceleration (m/s², direction included —
+    /// Zup: (0,0,-G); Colmap: (0,+G,0)). Returns indices of projectiles to remove.
     pub fn update_projectiles(
         &mut self,
         dt: f32,
+        gravity: Vector3<f32>,
         octree: Option<&crate::collision::Octree>,
     ) -> Vec<usize> {
         let mut to_remove = Vec::new();
         for (i, p) in self.projectiles.iter_mut().enumerate() {
+            // Gravity pulls the shot down over its flight (ballistic arc).
+            p.vel += gravity * dt;
             // Move
             p.pos.x += p.vel.x * dt;
             p.pos.y += p.vel.y * dt;

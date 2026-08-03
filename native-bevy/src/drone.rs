@@ -19,6 +19,13 @@ const RAD2DEG: f32 = 180.0 / std::f32::consts::PI;
 const G: f32 = 9.81;
 const AIR_DENSITY: f32 = 1.225;
 
+/// Battle-mode SPACE-FIGHTER physics toggle. `false` (current design) = battle mode flies the
+/// regular Drone (stabilized) control law WITH gravity — only the weapons/health systems differ
+/// from race mode. The no-gravity space-fighter law (`control_battle`: thrust along body +X,
+/// reduced drag, arcade stop-on-release) is kept compiled behind this switch so it can be
+/// re-enabled later without re-writing it.
+const USE_BATTLE_SPACE_PHYSICS: bool = false;
+
 fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
     v.max(lo).min(hi)
 }
@@ -76,8 +83,8 @@ impl KeyState {
         DroneInput {
             roll: if self.right { -1. } else if self.left { 1. } else { 0. },
             pitch: if self.up { -1. } else if self.down { 1. } else { 0. },
-            // In battle mode, centered throttle = 0 (no thrust). In race mode, centered throttle
-            // = -0.2 (slight descent / hover assist for FPV).
+            // In battle mode, centered throttle = 0 → Drone-mode altitude hold (W/S = full
+            // climb/descend). In race mode, centered throttle = -0.2 (slight descent for FPV).
             throttle: if battle_mode {
                 if self.w { 1.0 } else if self.s { -1.0 } else { 0.0 }
             } else {
@@ -353,7 +360,9 @@ impl Drone {
         if !input.armed {
             self.update_disarmed(dt);
             self.fpv_pos_locked = true; // reset lock for next arm
-        } else if self.battle_mode {
+        } else if self.battle_mode && USE_BATTLE_SPACE_PHYSICS {
+            // No-gravity space-fighter law — DISABLED (USE_BATTLE_SPACE_PHYSICS = false).
+            // Battle mode currently falls through to the normal Drone/FPV dispatch below.
             self.control_battle(dt, input);
             self.fpv_pos_locked = false;
         } else if self.flight_mode == FlightMode::Drone {
@@ -370,10 +379,10 @@ impl Drone {
         // Extract rotation matrix from orientation (q_bw: body→world).
         // Columns of Matrix3::from(q_bw) are body axes in world.
         let rot = Matrix3::from(self.orientation);
-        // Thrust direction depends on battle mode:
-        //   Normal (Fpv/Drone): body -Z (up) — thrust fights gravity
-        //   Battle:              body +X (forward) — no gravity, space-fighter style
-        let is_battle = self.battle_mode;
+        // Thrust direction depends on the (currently disabled) space-fighter battle physics:
+        //   Normal (Fpv/Drone — incl. battle-with-gravity): body -Z (up) — thrust fights gravity
+        //   Space-fighter battle:                            body +X (forward) — no gravity
+        let is_battle = self.battle_mode && USE_BATTLE_SPACE_PHYSICS;
         let thrust_dir = if is_battle {
             // body +X (forward) in world = col0
             Vector3::new(rot.x.x, rot.x.y, rot.x.z)
@@ -490,8 +499,9 @@ impl Drone {
             FlightMode::Fpv => self.camera_mount_angle,
             FlightMode::Drone => self.camera_tilt_angle,
         };
-        // In battle mode, always use the FPV mount angle regardless of flight_mode.
-        let mount_deg = if self.battle_mode { self.camera_mount_angle } else { mount_deg };
+        // The (disabled) space-fighter battle used the FPV mount angle; with Drone-mode battle the
+        // per-mode angle above applies, keeping the view aligned with the fire axis (tilt 0).
+        let mount_deg = if self.battle_mode && USE_BATTLE_SPACE_PHYSICS { self.camera_mount_angle } else { mount_deg };
         let mount_rad = mount_deg * DEG2RAD;
         // Negate: a right-handed rotation about body +Y pitches forward→down, so we flip the sign to
         // make a positive mount angle look up.
