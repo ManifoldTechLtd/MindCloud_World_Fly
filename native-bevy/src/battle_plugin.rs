@@ -19,20 +19,41 @@ use crate::splat_plugin::SplatScene;
 /// RenderLayers for projectiles: visible to all cameras (layer 0 = shared).
 const PROJECTILE_LAYER: usize = 0;
 
+/// RenderLayers base for the per-player hit-spheres: player `p`'s shell lives on layer
+/// `HIT_SPHERE_LAYER_BASE + p`. Each battle camera renders only the OPPONENT's layer — never
+/// its own — because the camera sits INSIDE its own 0.5 m shell (double-sided translucent
+/// material), which otherwise tints the whole view cyan (the reported "green bullets look
+/// cyan / opponent discoloured" bug). Drone models use `DRONE_VIS_LAYER_BASE` (3) + {0,1},
+/// so the shells start right after at 5.
+pub const HIT_SPHERE_LAYER_BASE: usize = crate::flight::DRONE_VIS_LAYER_BASE + 2;
+
 /// Muzzle offset below the camera/screen centre (m, along body +Z = down): the shot spawns
 /// slightly under the view centre so the tracer is visible leaving the screen.
 const MUZZLE_DROP: f32 = 0.2;
 
 /// Fixed battle hit-sphere radius per drone (m). Intentionally generous (vs the tunable
 /// physics `collision_radius`) so shots connect more often; scene collision is unaffected.
-const BATTLE_HIT_RADIUS: f32 = 0.3;
+const BATTLE_HIT_RADIUS: f32 = 0.5;
 
 /// Gravitational acceleration applied to projectiles (m/s²) — ballistic drop.
 const PROJECTILE_G: f32 = 9.81;
 
+/// Hit-marker flash duration (s): how long the white X shows after landing a shot.
+const HIT_MARKER_SECS: f32 = 0.3;
+
+/// "Got hit" hit-sphere flash duration (s): colour/opacity pulse when a shot lands on you.
+const HURT_FLASH_SECS: f32 = 0.35;
+
 /// Marker for projectile visual entities (all despawned + respawned each frame).
 #[derive(Component)]
 struct ProjectileVisual;
+
+/// Translucent hit-sphere visual following player `player`'s drone (battle mode only): shows
+/// the fixed BATTLE_HIT_RADIUS judgement ball; flashes red/opaque briefly when hit.
+#[derive(Component)]
+struct HitSphereVisual {
+    player: usize,
+}
 
 pub struct BattlePlugin;
 
@@ -45,6 +66,7 @@ impl Plugin for BattlePlugin {
                 battle_fire_system,
                 battle_projectile_physics_system,
                 battle_visual_sync_system,
+                battle_hit_sphere_system,
                 battle_reset_system,
             )
                 .chain()
@@ -53,7 +75,7 @@ impl Plugin for BattlePlugin {
         );
         app.add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            battle_finish_overlay_system
+            (battle_hud_system, battle_finish_overlay_system)
                 .run_if(in_state(AppState::Playing))
                 .run_if(resource_exists::<BattleState>),
         );
@@ -82,6 +104,31 @@ fn setup_battle(
     });
     commands.insert_resource(BeamMeshRes(mesh));
     commands.insert_resource(BeamMatRes(mat));
+    // Per-player energy-shield shell (the fixed judgement ball, battle mode only): a smooth
+    // translucent bubble. True alpha-blending over the 3DGS background works because the splat
+    // pass now composites BEFORE the transparent mesh pass (see splat_plugin's render-graph
+    // edges); each camera renders only the OPPONENT's shell (see HIT_SPHERE_LAYER_BASE), so
+    // the pilot never sits inside their own bubble tinting the whole view.
+    let sphere_mesh = meshes.add(Sphere::new(BATTLE_HIT_RADIUS));
+    for player in 0..crate::input_plugin::NUM_PLAYERS {
+        let sphere_mat = materials.add(StandardMaterial {
+            // Idle: faint cyan, alpha 0.3. Front faces only (default back-face culling) — a
+            // single tint layer reads cleaner than front+back double-blend.
+            base_color: Color::srgba(0.3, 0.8, 1.0, 0.3),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(sphere_mesh.clone()),
+            MeshMaterial3d(sphere_mat),
+            Transform::default(),
+            Visibility::Hidden,
+            HitSphereVisual { player },
+            RenderLayers::layer(HIT_SPHERE_LAYER_BASE + player),
+            SceneEntity,
+        ));
+    }
     info!("[Battle] setup: initialized (weapons lazy-init on first frame)");
 }
 
@@ -97,12 +144,14 @@ fn battle_fire_system(
     if settings_open.0 || menu.show_exit {
         return;
     }
-    // Lazy-init: ensure we have one weapon + health per player.
+    // Lazy-init: ensure we have one weapon + health + hit/hurt flash per player.
     if battle.weapons.len() < players.0.len() {
         battle.weapons.resize_with(players.0.len(), WeaponState::default);
         while battle.player_health.len() < players.0.len() {
             battle.player_health.push(Health::new(100.0));
         }
+        battle.hit_markers.resize(players.0.len(), 0.0);
+        battle.hurt_flashes.resize(players.0.len(), 0.0);
         info!("[Battle] initialized {} weapon(s) + health", players.0.len());
     }
     let fire_keys = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
@@ -164,7 +213,22 @@ fn battle_projectile_physics_system(
     if !hit_remove.is_empty() {
         battle.remove_projectiles(&hit_remove);
     }
+    // Tick down hit-marker + hurt flashes, then re-arm on each landed hit.
+    for m in &mut battle.hit_markers {
+        *m = (*m - dt).max(0.0);
+    }
+    for f in &mut battle.hurt_flashes {
+        *f = (*f - dt).max(0.0);
+    }
     for ev in &events {
+        if let Some(k) = ev.killer {
+            if let Some(m) = battle.hit_markers.get_mut(k) {
+                *m = HIT_MARKER_SECS;
+            }
+        }
+        if let Some(f) = battle.hurt_flashes.get_mut(ev.target_player) {
+            *f = HURT_FLASH_SECS;
+        }
         let killed = battle.apply_hit(ev);
         if killed {
             let killer = ev.killer.map(|k| format!("P{}", k + 1)).unwrap_or_else(|| "NPC".into());
@@ -226,6 +290,46 @@ fn build_projectile_mesh(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
     meshes.add(Sphere::new(0.1))
 }
 
+/// Snap each player's translucent hit-sphere onto their drone and drive the "got hit" flash:
+/// idle = faint cyan shell; hit = red + much more opaque, fading back over HURT_FLASH_SECS.
+/// Spheres for player slots beyond the active player count stay hidden. Battle mode only
+/// (these entities are only ever spawned by `setup_battle`).
+fn battle_hit_sphere_system(
+    battle: Res<BattleState>,
+    players: Res<Players>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut spheres: Query<(&HitSphereVisual, &mut Transform, &mut Visibility, &MeshMaterial3d<StandardMaterial>)>,
+) {
+    for (hs, mut tf, mut vis, mat) in &mut spheres {
+        let Some(p) = players.0.get(hs.player) else {
+            *vis = Visibility::Hidden; // inactive slot (e.g. P2 in single player)
+            continue;
+        };
+        // Dead players' spheres disappear with them.
+        let alive = battle.player_health.get(hs.player).map_or(true, |h| h.is_alive());
+        *vis = if alive { Visibility::Inherited } else { Visibility::Hidden };
+        let d = &p.drone;
+        tf.translation = Vec3::new(d.x, d.y, d.z);
+        // "Got hit" feedback: bubble blends cyan→red, opacity 0.3→0.6, and pops out ~12%
+        // (impact pulse), all easing back over HURT_FLASH_SECS.
+        let t = battle
+            .hurt_flashes
+            .get(hs.player)
+            .map_or(0.0, |f| (f / HURT_FLASH_SECS).clamp(0.0, 1.0));
+        tf.scale = Vec3::splat(1.0 + 0.12 * t);
+        if let Some(m) = materials.get_mut(&mat.0) {
+            let idle = (0.3, 0.8, 1.0, 0.3); // rgba
+            let hit = (1.0, 0.15, 0.1, 0.6);
+            m.base_color = Color::srgba(
+                idle.0 + (hit.0 - idle.0) * t,
+                idle.1 + (hit.1 - idle.1) * t,
+                idle.2 + (hit.2 - idle.2) * t,
+                idle.3 + (hit.3 - idle.3) * t,
+            );
+        }
+    }
+}
+
 /// Handle R-reset in battle mode: reset health, clear projectiles, clear winner.
 fn battle_reset_system(
     keys: Res<ButtonInput<KeyCode>>,
@@ -242,6 +346,47 @@ fn battle_reset_system(
     battle.projectiles.clear();
     battle.winner = None;
     info!("[Battle] reset — all health restored, match restarted");
+}
+
+/// Battle HUD: each player's own health bar + hit-marker flash, drawn in their viewport half
+/// (full window in single player). Hidden once the match is over (finish overlay takes over).
+fn battle_hud_system(
+    mut contexts: bevy_egui::EguiContexts,
+    battle: Res<BattleState>,
+    players: Res<Players>,
+    windows: Query<&Window>,
+) -> Result {
+    if battle.winner.is_some() || players.0.is_empty() || battle.player_health.is_empty() {
+        return Ok(());
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return Ok(());
+    };
+    if players.0.len() == 1 {
+        let h = &battle.player_health[0];
+        let marker = battle.hit_markers.first().copied().unwrap_or(0.0);
+        crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, None, None);
+    } else {
+        // Window uses scale_factor_override(1.0) → egui points == physical px == the viewports.
+        let Ok(win) = windows.single() else {
+            return Ok(());
+        };
+        let (w, hh) = (win.width(), win.height());
+        let half = hh * 0.5;
+        let labels = ["P1", "P2"];
+        for (i, _) in players.0.iter().enumerate().take(2) {
+            let Some(h) = battle.player_health.get(i) else {
+                continue;
+            };
+            let marker = battle.hit_markers.get(i).copied().unwrap_or(0.0);
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, half * i as f32),
+                egui::vec2(w, half),
+            );
+            crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, Some(labels[i]), Some(rect));
+        }
+    }
+    Ok(())
 }
 
 /// Battle finish overlay: when `battle.winner` is set, show VICTORY/DEFEATED to each player.

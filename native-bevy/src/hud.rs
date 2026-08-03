@@ -14,6 +14,68 @@ const DIM: Color32 = Color32::from_rgb(100, 160, 100);
 const WARN: Color32 = Color32::from_rgb(255, 80, 80);
 const BG: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 120);
 
+/// Draw the battle HUD for one player's viewport: the player's own health bar (top-center,
+/// green→yellow→red by remaining fraction) and a brief white X hit-marker flash around the
+/// center reticle while `hit_marker` > 0 (seconds left, set when this player lands a shot).
+pub fn draw_battle_hud(
+    ctx: &egui::Context,
+    health_current: f32,
+    health_pct: f32,
+    hit_marker: f32,
+    player_label: Option<&str>,
+    viewport: Option<Rect>,
+) {
+    let vp = viewport.unwrap_or_else(|| ctx.content_rect());
+    let area_id = player_label.unwrap_or("sp");
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new(format!("battle_hud_{}", area_id)),
+    ));
+
+    // ---- Health bar (top-center, where the old XYZ readout used to sit) ----
+    let bar_w = 320.0;
+    let bar_h = 16.0;
+    let cx = vp.center().x;
+    let top = vp.min.y + 12.0;
+    let bar = Rect::from_min_size(Pos2::new(cx - bar_w / 2.0, top), Vec2::new(bar_w, bar_h));
+    painter.rect_filled(bar, 3.0, BG);
+    let pct = health_pct.clamp(0.0, 1.0);
+    let col = if pct > 0.6 {
+        Color32::from_rgb(0, 220, 90)
+    } else if pct > 0.3 {
+        Color32::from_rgb(255, 200, 40)
+    } else {
+        WARN
+    };
+    if pct > 0.0 {
+        let fill = Rect::from_min_size(
+            bar.min + Vec2::new(2.0, 2.0),
+            Vec2::new((bar_w - 4.0) * pct, bar_h - 4.0),
+        );
+        painter.rect_filled(fill, 2.0, col);
+    }
+    painter.text(
+        Pos2::new(cx, bar.center().y),
+        egui::Align2::CENTER_CENTER,
+        format!("HP {:.0}", health_current),
+        FontId::monospace(11.0),
+        Color32::WHITE,
+    );
+
+    // ---- Hit marker: white X flash around the center reticle when a shot lands ----
+    if hit_marker > 0.0 {
+        let a = ((hit_marker / 0.3).clamp(0.0, 1.0) * 255.0) as u8;
+        let hcol = Color32::from_rgba_unmultiplied(255, 255, 255, a);
+        let c = vp.center();
+        let (gap, len) = (6.0, 10.0);
+        for (dx, dy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let from = Pos2::new(c.x + gap * dx, c.y + gap * dy);
+            let to = Pos2::new(c.x + (gap + len) * dx, c.y + (gap + len) * dy);
+            painter.line_segment([from, to], Stroke::new(2.5, hcol));
+        }
+    }
+}
+
 /// Draw the race panel (gate count · current lap · best lap) at the viewport's top-left, below the
 /// info panel. No-op unless the course is visible and has gates. Ported from native `src/hud.rs`.
 pub fn draw_race(
@@ -131,16 +193,8 @@ pub fn draw_hud(
         draw_alt_tape(&painter, w, h, cx, cy, altitude);
         draw_heading(&painter, w, h, cx, cy, drone.yaw);
         draw_vsi(&painter, w, h, cx, cy, drone.vertical_speed);
-
-        // World position XYZ readout (top center).
-        let pos_text = format!("X:{:.2} Y:{:.2} Z:{:.2}", drone.x, drone.y, drone.z);
-        painter.text(
-            Pos2::new(cx, vp.min.y + 20.0),
-            egui::Align2::CENTER_CENTER,
-            pos_text,
-            FontId::monospace(14.0),
-            Color32::YELLOW,
-        );
+        // (The world-position X/Y/Z readout that sat top-center was removed — the battle HUD's
+        // health bar now occupies that spot, and the coordinates added no piloting value.)
     }
 }
 

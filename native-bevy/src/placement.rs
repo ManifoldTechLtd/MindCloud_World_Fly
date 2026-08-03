@@ -241,9 +241,14 @@ fn setup_scene(
             layer_ids.push(crate::flight::DRONE_VIS_LAYER_BASE + (1 - index as usize));
         }
         // In battle mode, also render your OWN drone model (unlike race mode where FPV pilots
-        // shouldn't see their own body — battle mode needs visual feedback of the drone).
+        // shouldn't see their own body — battle mode needs visual feedback of the drone), plus
+        // the OPPONENT's hit-sphere shell (never your own — the camera sits inside it and the
+        // double-sided translucent material would tint the whole view).
         if matches!(*game_type, crate::app_state::GameType::Battle) {
             layer_ids.push(crate::flight::DRONE_VIS_LAYER_BASE + index as usize);
+            if matches!(*mode, GameMode::DualPlayer) {
+                layer_ids.push(crate::battle_plugin::HIT_SPHERE_LAYER_BASE + (1 - index as usize));
+            }
         }
         let render_layers = RenderLayers::from_layers(&layer_ids);
         let mut cam = commands.spawn((

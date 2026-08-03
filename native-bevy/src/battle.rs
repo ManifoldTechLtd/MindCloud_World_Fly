@@ -19,6 +19,10 @@ pub enum ProjectileOwner {
 #[derive(Clone, Debug)]
 pub struct Projectile {
     pub pos: Vector3<f32>,
+    /// Position at the start of this tick's move — `[prev_pos, pos]` is the bullet's swept
+    /// segment for continuous hit detection, re-tested EVERY frame of the flight (a point-only
+    /// test tunnels: fast bullets step farther per frame than the hit sphere's diameter).
+    pub prev_pos: Vector3<f32>,
     /// Velocity (initial = direction × speed); gravity bends it down each tick.
     pub vel: Vector3<f32>,
     pub owner: ProjectileOwner,
@@ -90,6 +94,16 @@ pub struct BattleState {
     pub weapons: Vec<WeaponState>,
     /// One health per player (P1=0, P2=1). Lazy-init in battle_fire_system.
     pub player_health: Vec<Health>,
+    /// Per-player hit-marker flash timer (seconds left); set when THAT player lands a shot,
+    /// ticked down each frame — drives the brief crosshair-X flash in the battle HUD.
+    pub hit_markers: Vec<f32>,
+    /// Per-player "got hit" flash timer (seconds left); set when THAT player IS hit, ticked
+    /// down each frame — drives the hit-sphere colour/opacity flash (translucent shield ball).
+    pub hurt_flashes: Vec<f32>,
+    /// Each player's drone position at the PREVIOUS `check_hits` tick — gives the target's own
+    /// per-frame motion segment so the sweep is done on the RELATIVE motion (bullet AND target
+    /// both move within a frame; sweeping only the bullet can still miss a fast-crossing drone).
+    pub prev_drone_positions: Vec<Vector3<f32>>,
     /// Set when the match ends (winner determined).
     pub winner: Option<BattleWinner>,
 }
@@ -108,7 +122,8 @@ impl BattleState {
         for (i, p) in self.projectiles.iter_mut().enumerate() {
             // Gravity pulls the shot down over its flight (ballistic arc).
             p.vel += gravity * dt;
-            // Move
+            // Move (keep the pre-move position: the swept hit test needs this frame's segment).
+            p.prev_pos = p.pos;
             p.pos.x += p.vel.x * dt;
             p.pos.y += p.vel.y * dt;
             p.pos.z += p.vel.z * dt;
@@ -153,6 +168,7 @@ impl BattleState {
         let speed = weapon.projectile_speed;
         self.projectiles.push(Projectile {
             pos,
+            prev_pos: pos,
             vel: Vector3::new(dir.x * speed, dir.y * speed, dir.z * speed),
             owner: ProjectileOwner::Player(player_idx),
             lifetime: weapon.projectile_lifetime,
@@ -171,7 +187,11 @@ impl BattleState {
         }
     }
 
-    /// Check projectile-vs-drone hits. `drone_positions` is (pos, collision_radius) per player.
+    /// Check projectile-vs-drone hits for THIS frame. `drone_positions` is (pos,
+    /// collision_radius) per player. Continuous (swept) detection on the RELATIVE motion:
+    /// both the bullet ([prev_pos → pos]) and the target (previous → current drone position)
+    /// move during a frame, so we test the bullet's path in the target's moving frame —
+    /// equivalent to sweeping both. Point-only tests tunnel at low FPS / high closing speeds.
     /// Returns (projectile indices to remove, hit events) — caller logs/scores.
     pub fn check_hits(
         &mut self,
@@ -191,12 +211,26 @@ impl BattleState {
                         continue;
                     }
                 }
-                let dx = proj.pos.x - pos.x;
-                let dy = proj.pos.y - pos.y;
-                let dz = proj.pos.z - pos.z;
-                let dist_sq = dx * dx + dy * dy + dz * dz;
                 let hit_dist = proj.radius + radius;
-                if dist_sq < hit_dist * hit_dist {
+                // Relative-motion sweep: subtract the target's frame displacement from the
+                // bullet's end point, turning "both moving" into "segment vs static sphere".
+                let target_prev = self
+                    .prev_drone_positions
+                    .get(player_idx)
+                    .copied()
+                    .unwrap_or(*pos);
+                let a = proj.prev_pos - target_prev; // bullet start, relative to target start
+                let b = proj.pos - *pos; // bullet end, relative to target end
+                let ab = b - a;
+                let len_sq = ab.magnitude2();
+                // Closest approach of the relative segment to the (now static) target origin.
+                let t = if len_sq > 1e-9 {
+                    (-a.dot(ab) / len_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let closest = a + ab * t;
+                if closest.magnitude2() < hit_dist * hit_dist {
                     to_remove.push(i);
                     events.push(HitEvent {
                         target_player: player_idx,
@@ -210,6 +244,8 @@ impl BattleState {
                 }
             }
         }
+        // Remember this frame's target positions for the next frame's relative sweep.
+        self.prev_drone_positions = drone_positions.iter().map(|(p, _)| *p).collect();
         (to_remove, events)
     }
 

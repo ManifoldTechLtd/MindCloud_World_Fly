@@ -209,12 +209,15 @@ impl Plugin for SplatPlugin {
             .add_render_graph_node::<ViewNodeRunner<SplatNode>>(Core3d, SplatPassLabel)
             .add_render_graph_edges(
                 Core3d,
-                // Run splat AFTER the opaque/transparent mesh passes so the mesh depth buffer is
-                // fully populated. The splat rasterize then depth-tests each splat against the
-                // mesh depth (read-only, reverse-Z Greater): splats behind meshes are discarded,
-                // splats in front are composited over. The camera clears to black; splats fill
-                // the background wherever no mesh is present.
-                (Node3d::MainTransparentPass, SplatPassLabel, Node3d::EndMainPass),
+                // Run splat AFTER the opaque/alpha-mask passes (mesh depth fully populated —
+                // transparent meshes never write depth anyway) but BEFORE the transparent pass.
+                // The splat rasterize depth-tests each splat against the opaque mesh depth
+                // (read-only, reverse-Z Greater): splats behind meshes are discarded, splats in
+                // front are composited over. Transparent meshes (e.g. the battle hit-sphere
+                // shield) then alpha-blend OVER the composited splat — with the old
+                // after-transparent order the splat painted over them, so translucent shells
+                // only showed against the empty sky (the "faraway ball" bug).
+                (Node3d::MainOpaquePass, SplatPassLabel, Node3d::MainTransparentPass),
             );
     }
 }
