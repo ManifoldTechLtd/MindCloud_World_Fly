@@ -33,7 +33,12 @@ const MUZZLE_DROP: f32 = 0.2;
 
 /// Fixed battle hit-sphere radius per drone (m). Intentionally generous (vs the tunable
 /// physics `collision_radius`) so shots connect more often; scene collision is unaffected.
-const BATTLE_HIT_RADIUS: f32 = 0.5;
+const BATTLE_HIT_RADIUS: f32 = 0.3;
+
+/// Hit-sphere centre lift above the drone ORIGIN (m, along world up): the glTF model's origin
+/// sits at its underside, so the ball is raised to wrap the model's geometric centre. Applied
+/// identically to the hit TEST and the shield VISUAL so they always coincide.
+const BATTLE_HIT_CENTER_LIFT: f32 = 0.1;
 
 /// Gravitational acceleration applied to projectiles (m/s²) — ballistic drop.
 const PROJECTILE_G: f32 = 9.81;
@@ -203,10 +208,15 @@ fn battle_projectile_physics_system(
         battle.remove_projectiles(&to_remove);
     }
     // Check projectile-vs-drone hits with the FIXED battle hit radius (not the tunable
-    // physics collision_radius) so hit probability stays consistent.
+    // physics collision_radius) so hit probability stays consistent. The centre is lifted
+    // BATTLE_HIT_CENTER_LIFT above the drone origin (model origin sits at its underside).
+    let lift = match config.0.world_up {
+        WorldUp::Zup => cgmath::Vector3::new(0.0, 0.0, BATTLE_HIT_CENTER_LIFT),
+        WorldUp::Colmap => cgmath::Vector3::new(0.0, -BATTLE_HIT_CENTER_LIFT, 0.0),
+    };
     let drone_positions: Vec<(cgmath::Vector3<f32>, f32)> = players.0.iter()
         .map(|p| {
-            (cgmath::Vector3::new(p.drone.x, p.drone.y, p.drone.z), BATTLE_HIT_RADIUS)
+            (cgmath::Vector3::new(p.drone.x, p.drone.y, p.drone.z) + lift, BATTLE_HIT_RADIUS)
         })
         .collect();
     let (hit_remove, events) = battle.check_hits(&drone_positions);
@@ -297,9 +307,15 @@ fn build_projectile_mesh(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
 fn battle_hit_sphere_system(
     battle: Res<BattleState>,
     players: Res<Players>,
+    config: Res<CurrentSceneConfig>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut spheres: Query<(&HitSphereVisual, &mut Transform, &mut Visibility, &MeshMaterial3d<StandardMaterial>)>,
 ) {
+    // Same world-up lift as the hit test, so the visual shell IS the judgement volume.
+    let lift = match config.0.world_up {
+        WorldUp::Zup => Vec3::new(0.0, 0.0, BATTLE_HIT_CENTER_LIFT),
+        WorldUp::Colmap => Vec3::new(0.0, -BATTLE_HIT_CENTER_LIFT, 0.0),
+    };
     for (hs, mut tf, mut vis, mat) in &mut spheres {
         let Some(p) = players.0.get(hs.player) else {
             *vis = Visibility::Hidden; // inactive slot (e.g. P2 in single player)
@@ -309,7 +325,7 @@ fn battle_hit_sphere_system(
         let alive = battle.player_health.get(hs.player).map_or(true, |h| h.is_alive());
         *vis = if alive { Visibility::Inherited } else { Visibility::Hidden };
         let d = &p.drone;
-        tf.translation = Vec3::new(d.x, d.y, d.z);
+        tf.translation = Vec3::new(d.x, d.y, d.z) + lift;
         // "Got hit" feedback: bubble blends cyan→red, opacity 0.3→0.6, and pops out ~12%
         // (impact pulse), all easing back over HURT_FLASH_SECS.
         let t = battle
@@ -365,7 +381,8 @@ fn battle_hud_system(
     if players.0.len() == 1 {
         let h = &battle.player_health[0];
         let marker = battle.hit_markers.first().copied().unwrap_or(0.0);
-        crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, None, None);
+        let hurt = battle.hurt_flashes.first().copied().unwrap_or(0.0) / HURT_FLASH_SECS;
+        crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, hurt, None, None);
     } else {
         // Window uses scale_factor_override(1.0) → egui points == physical px == the viewports.
         let Ok(win) = windows.single() else {
@@ -379,11 +396,12 @@ fn battle_hud_system(
                 continue;
             };
             let marker = battle.hit_markers.get(i).copied().unwrap_or(0.0);
+            let hurt = battle.hurt_flashes.get(i).copied().unwrap_or(0.0) / HURT_FLASH_SECS;
             let rect = egui::Rect::from_min_size(
                 egui::pos2(0.0, half * i as f32),
                 egui::vec2(w, half),
             );
-            crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, Some(labels[i]), Some(rect));
+            crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, hurt, Some(labels[i]), Some(rect));
         }
     }
     Ok(())

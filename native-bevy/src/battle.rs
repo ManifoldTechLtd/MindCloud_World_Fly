@@ -78,7 +78,7 @@ impl Default for WeaponState {
             cooldown_remaining: 0.0,
             cooldown_duration: 0.15,     // 300 RPM
             projectile_speed: 70.0,      // m/s
-            projectile_damage: 15.0,
+            projectile_damage: 10.0,
             projectile_lifetime: 3.0,   // seconds
             projectile_radius: 0.2,     // collision radius
         }

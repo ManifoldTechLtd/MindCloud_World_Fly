@@ -15,13 +15,16 @@ const WARN: Color32 = Color32::from_rgb(255, 80, 80);
 const BG: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 120);
 
 /// Draw the battle HUD for one player's viewport: the player's own health bar (top-center,
-/// green→yellow→red by remaining fraction) and a brief white X hit-marker flash around the
-/// center reticle while `hit_marker` > 0 (seconds left, set when this player lands a shot).
+/// green→yellow→red by remaining fraction), a brief white X hit-marker flash around the
+/// center reticle while `hit_marker` > 0 (seconds left, set when this player lands a shot),
+/// and a red damage vignette — edge-to-center red glow flashing with `hurt_flash` (0..1, set
+/// when this player IS hit) and lingering faintly while HP is critical (< 30%).
 pub fn draw_battle_hud(
     ctx: &egui::Context,
     health_current: f32,
     health_pct: f32,
     hit_marker: f32,
+    hurt_flash: f32,
     player_label: Option<&str>,
     viewport: Option<Rect>,
 ) {
@@ -31,6 +34,44 @@ pub fn draw_battle_hud(
         egui::Order::Middle,
         egui::Id::new(format!("battle_hud_{}", area_id)),
     ));
+
+    // ---- Damage vignettes: red edge glow, transparent toward the centre (keeps the view
+    // flyable). Two independent layers:
+    //  - low-HP warning: WIDER band (26% of the short side), persistent below 30% HP;
+    //    opacity starts at 35% and steps +5% per -10% HP (30%→35%, 20%→40%, 10%→45%, 0→50%).
+    //  - hit flash: narrower band (18%), peaks ~51% opacity, fades over the flash timer.
+    // Drawn low-HP first then flash on top — a hit while critical reads even hotter.
+    let pct = health_pct.clamp(0.0, 1.0);
+    let vignette = |band_frac: f32, a: u8| {
+        if a == 0 {
+            return;
+        }
+        let band = vp.width().min(vp.height()) * band_frac;
+        let outer = egui::Color32::from_rgba_unmultiplied(255, 30, 30, a);
+        let inner = egui::Color32::from_rgba_unmultiplied(255, 30, 30, 0);
+        let uv = egui::epaint::WHITE_UV;
+        let mut mesh = egui::epaint::Mesh::default();
+        // One gradient quad per screen edge: outer rim fully tinted → inner edge transparent
+        // (vertex-colour interpolation does the falloff; corners overlap = naturally stronger).
+        let mut quad = |p: [(Pos2, Color32); 4]| {
+            let i = mesh.vertices.len() as u32;
+            for (pos, color) in p {
+                mesh.vertices.push(egui::epaint::Vertex { pos, uv, color });
+            }
+            mesh.indices.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+        };
+        let (l, t, r, b) = (vp.min.x, vp.min.y, vp.max.x, vp.max.y);
+        // top / bottom / left / right bands
+        quad([(Pos2::new(l, t), outer), (Pos2::new(r, t), outer), (Pos2::new(r, t + band), inner), (Pos2::new(l, t + band), inner)]);
+        quad([(Pos2::new(l, b - band), inner), (Pos2::new(r, b - band), inner), (Pos2::new(r, b), outer), (Pos2::new(l, b), outer)]);
+        quad([(Pos2::new(l, t), outer), (Pos2::new(l + band, t), inner), (Pos2::new(l + band, b), inner), (Pos2::new(l, b), outer)]);
+        quad([(Pos2::new(r - band, t), inner), (Pos2::new(r, t), outer), (Pos2::new(r, b), outer), (Pos2::new(r - band, b), inner)]);
+        painter.add(egui::Shape::mesh(mesh));
+    };
+    let low_hp_a = if pct <= 0.3 { ((0.35 + (0.3 - pct) * 0.5) * 255.0) as u8 } else { 0 };
+    vignette(0.26, low_hp_a);
+    let flash_a = (hurt_flash.clamp(0.0, 1.0) * 130.0) as u8;
+    vignette(0.18, flash_a);
 
     // ---- Health bar (top-center, where the old XYZ readout used to sit) ----
     let bar_w = 320.0;
