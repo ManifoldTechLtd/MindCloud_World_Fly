@@ -341,6 +341,13 @@ fn drive_player(
         }
         _ => kbd,
     };
+    if locked && p.drone.battle_mode {
+        // Battle countdown: FULL control freeze — no attitude changes either, so nobody can
+        // pre-aim at the opponent before GO (race mode intentionally allows aiming in place).
+        // Inputs were still polled above (arm/mode switches stay live), physics is skipped.
+        p.drone.lock_position();
+        return;
+    }
     p.drone.update(dt, &input);
     if locked {
         // Countdown: hold the drone on the start line; the attitude from `update` is kept.

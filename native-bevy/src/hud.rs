@@ -14,6 +14,72 @@ const DIM: Color32 = Color32::from_rgb(100, 160, 100);
 const WARN: Color32 = Color32::from_rgb(255, 80, 80);
 const BG: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 120);
 
+/// Where the opponent sits relative to this player's view — computed by
+/// `battle_plugin::battle_hud_system`, drawn by [`draw_battle_target`].
+pub enum TargetIndicator {
+    /// Opponent projects inside the viewport: diamond marker at `pos` + `dist` metres,
+    /// plus an optional ballistic lead point (aim here to land a shot).
+    OnScreen { pos: Pos2, dist: f32, lead: Option<Pos2> },
+    /// Opponent is off-screen / behind: an arrow on the viewport border at `pos`,
+    /// rotated by `angle` (radians, screen convention) to point toward the target.
+    Edge { pos: Pos2, angle: f32 },
+}
+
+/// Enemy locator (battle mode, air-combat style). Always visible — a radar-lock style UI
+/// that intentionally shows through walls (the 3D world already communicates occlusion).
+pub fn draw_battle_target(ctx: &egui::Context, indicator: &TargetIndicator, area_id: &str) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new(format!("battle_target_{}", area_id)),
+    ));
+    let enemy = Color32::from_rgb(255, 40, 40); // red = hostile (pops against green scenery)
+    match indicator {
+        TargetIndicator::OnScreen { pos, dist, lead } => {
+            // Diamond bracket around the opponent (hollow — never hides the aircraft).
+            let r = 24.0;
+            let pts = [
+                Pos2::new(pos.x, pos.y - r),
+                Pos2::new(pos.x + r, pos.y),
+                Pos2::new(pos.x, pos.y + r),
+                Pos2::new(pos.x - r, pos.y),
+            ];
+            for i in 0..4 {
+                painter.line_segment([pts[i], pts[(i + 1) % 4]], Stroke::new(2.5, enemy));
+            }
+            painter.text(
+                Pos2::new(pos.x, pos.y + r + 14.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}m", dist),
+                FontId::monospace(13.0),
+                enemy,
+            );
+            // Ballistic lead point: put the reticle here and the shot lands (gravity + target
+            // motion solved). Yellow over a black underlay ring — readable against grass/sky
+            // alike (plain green vanished into green scenery).
+            if let Some(lead) = lead {
+                painter.circle_stroke(*lead, 8.0, Stroke::new(4.0, Color32::from_black_alpha(200)));
+                painter.circle_stroke(*lead, 8.0, Stroke::new(2.0, Color32::from_rgb(255, 230, 0)));
+                painter.circle_filled(*lead, 2.0, Color32::from_rgb(255, 230, 0));
+            }
+        }
+        TargetIndicator::Edge { pos, angle } => {
+            // Solid triangle sliding on the reticle ring, pointing toward the target's turn
+            // direction (black outline for contrast).
+            let (s, c) = angle.sin_cos();
+            let dir = Vec2::new(c, s);
+            let perp = Vec2::new(-s, c);
+            let tip = *pos + dir * 16.0;
+            let base_l = *pos - dir * 8.0 + perp * 10.0;
+            let base_r = *pos - dir * 8.0 - perp * 10.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, base_l, base_r],
+                enemy,
+                Stroke::new(1.5, Color32::from_black_alpha(200)),
+            ));
+        }
+    }
+}
+
 /// Draw the battle HUD for one player's viewport: the player's own health bar (top-center,
 /// green→yellow→red by remaining fraction), a brief white X hit-marker flash around the
 /// center reticle while `hit_marker` > 0 (seconds left, set when this player lands a shot),

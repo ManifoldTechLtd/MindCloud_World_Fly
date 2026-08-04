@@ -160,6 +160,7 @@ fn battle_fire_system(
     mut battle: ResMut<BattleState>,
     players: Res<Players>,
     ctrl: Res<crate::input_plugin::ControllerRes>,
+    race: Res<crate::flight::RaceState>,
     settings_open: Res<crate::flight::SettingsOpen>,
     menu: Res<crate::menu::MenuState>,
 ) {
@@ -177,6 +178,11 @@ fn battle_fire_system(
         info!("[Battle] initialized {} weapon(s) + health", players.0.len());
     }
     let fire_keys = [KeyCode::ShiftLeft, KeyCode::ShiftRight];
+    // Weapons stay cold until GO (Ready + Countdown): controls are frozen then, and a shot
+    // lined up before the freeze must not fire either.
+    if !matches!(*race, crate::flight::RaceState::Racing { .. }) {
+        return;
+    }
     for (i, p) in players.0.iter().enumerate() {
         if !p.armed {
             continue;
@@ -395,6 +401,7 @@ fn battle_hud_system(
     mut contexts: bevy_egui::EguiContexts,
     battle: Res<BattleState>,
     players: Res<Players>,
+    config: Res<CurrentSceneConfig>,
     windows: Query<&Window>,
 ) -> Result {
     if battle.winner.is_some() || players.0.is_empty() || battle.player_health.is_empty() {
@@ -427,9 +434,117 @@ fn battle_hud_system(
                 egui::vec2(w, half),
             );
             crate::hud::draw_battle_hud(ctx, h.current, h.pct(), marker, hurt, Some(labels[i]), Some(rect));
+            // Enemy locator + ballistic lead — only while the opponent is alive.
+            let j = 1 - i;
+            let target_alive = battle.player_health.get(j).map_or(false, |th| th.is_alive());
+            if let (Some(target), true) = (players.0.get(j), target_alive) {
+                let speed = battle.weapons.get(i).map_or(70.0, |wp| wp.projectile_speed);
+                let ind = compute_target_indicator(
+                    &players.0[i],
+                    target,
+                    rect,
+                    config.0.world_up,
+                    speed,
+                );
+                crate::hud::draw_battle_target(ctx, &ind, labels[i]);
+            }
         }
     }
     Ok(())
+}
+
+/// Locate `target` in `viewer`'s viewport: an on-screen diamond (+ ballistic lead point) or
+/// an off-screen border arrow. Projection mirrors the render camera exactly: the drone's
+/// web-splat-convention camera (looks +Z, +Y down — matching egui's y-down screen directly)
+/// with Bevy's default 45° vertical FOV and the viewport's aspect.
+fn compute_target_indicator(
+    viewer: &crate::flight::PlayerState,
+    target: &crate::flight::PlayerState,
+    rect: egui::Rect,
+    world_up: WorldUp,
+    proj_speed: f32,
+) -> crate::hud::TargetIndicator {
+    use cgmath::InnerSpace;
+    // Aim at the shield centre (drone origin + the same lift the hit test uses).
+    let lift = match world_up {
+        WorldUp::Zup => cgmath::Vector3::new(0.0, 0.0, BATTLE_HIT_CENTER_LIFT),
+        WorldUp::Colmap => cgmath::Vector3::new(0.0, -BATTLE_HIT_CENTER_LIFT, 0.0),
+    };
+    let t_pos = cgmath::Vector3::new(target.drone.x, target.drone.y, target.drone.z) + lift;
+    let (cam_pos, cam_q) = viewer.drone.camera_transform(); // q = world→camera
+    let tan_half_y = (std::f32::consts::FRAC_PI_4 * 0.5).tan(); // Bevy default fovy = 45°
+    let tan_half_x = tan_half_y * (rect.width() / rect.height().max(1.0));
+    // World point → (camera-space vec, screen pos when in front of the camera).
+    let project = |p: cgmath::Vector3<f32>| -> (cgmath::Vector3<f32>, Option<egui::Pos2>) {
+        let v = cam_q * (p - cam_pos);
+        if v.z > 0.05 {
+            let nx = (v.x / v.z) / tan_half_x;
+            let ny = (v.y / v.z) / tan_half_y; // camera +Y down == screen +Y down
+            let pos = egui::pos2(
+                rect.min.x + (nx + 1.0) * 0.5 * rect.width(),
+                rect.min.y + (ny + 1.0) * 0.5 * rect.height(),
+            );
+            (v, Some(pos))
+        } else {
+            (v, None)
+        }
+    };
+
+    let dist = (t_pos - cam_pos).magnitude();
+    let (v_cam, screen) = project(t_pos);
+    let on_screen = screen.filter(|p| rect.expand(-24.0).contains(*p));
+    if let Some(pos) = on_screen {
+        // Ballistic lead: solve time-of-flight T so a shot from the muzzle meets the moving
+        // target — aim point A = predict(T) - ½g·T² (compensates drop), fixed-point iterated
+        // (converges in a few rounds at our speeds). Skipped beyond practical range.
+        let mut lead = None;
+        if dist < 150.0 {
+            let d = &viewer.drone;
+            let rot = cgmath::Matrix3::from(d.orientation);
+            let fwd = cgmath::Vector3::new(rot.x.x, rot.x.y, rot.x.z);
+            let down = cgmath::Vector3::new(rot.z.x, rot.z.y, rot.z.z);
+            let muzzle = cgmath::Vector3::new(d.x, d.y, d.z)
+                + fwd * (d.drone_size * 0.5)
+                + down * MUZZLE_DROP;
+            let g = match world_up {
+                WorldUp::Zup => cgmath::Vector3::new(0.0, 0.0, -PROJECTILE_G),
+                WorldUp::Colmap => cgmath::Vector3::new(0.0, PROJECTILE_G, 0.0),
+            };
+            let t_vel = cgmath::Vector3::new(target.drone.vx, target.drone.vy, target.drone.vz);
+            let v0 = proj_speed.max(1.0);
+            let mut tof = dist / v0;
+            let mut aim = t_pos;
+            for _ in 0..4 {
+                let predicted = t_pos + t_vel * tof;
+                aim = predicted - g * (0.5 * tof * tof);
+                tof = (aim - muzzle).magnitude() / v0;
+            }
+            if let (_, Some(p)) = project(aim) {
+                if rect.expand(-8.0).contains(p) {
+                    lead = Some(p);
+                }
+            }
+        }
+        return crate::hud::TargetIndicator::OnScreen { pos, dist, lead };
+    }
+
+    // Off-screen / behind: arrow sliding on a RING around the reticle (viewport centre) — a
+    // border-clamped arrow reads poorly on this very wide split viewport. The raw camera
+    // (x, y) keeps the correct turn direction even behind the camera (no perspective divide,
+    // so no sign flip); dead-astern degenerates to "straight down".
+    let (mut dx, mut dy) = (v_cam.x, v_cam.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-3 {
+        (dx, dy) = (0.0, 1.0);
+    } else {
+        (dx, dy) = (dx / len, dy / len);
+    }
+    let c = rect.center();
+    let ring_r = rect.width().min(rect.height()) * 0.35;
+    crate::hud::TargetIndicator::Edge {
+        pos: egui::pos2(c.x + dx * ring_r, c.y + dy * ring_r),
+        angle: dy.atan2(dx),
+    }
 }
 
 /// Battle finish overlay: when `battle.winner` is set, show VICTORY/DEFEATED to each player.
