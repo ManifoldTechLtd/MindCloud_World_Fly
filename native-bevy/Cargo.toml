@@ -21,6 +21,9 @@ bevy = { version = "0.18", default-features = false, features = [
     "gltf_animation",
     "multi_threaded",
     "png",
+    # JPEG textures inside glTF models — without this bevy_image can't decode them and a model
+    # whose textures are JPEG fails to load entirely (not just the texture).
+    "jpeg",
     # Auto-registers every #[derive(Reflect)] component into the type registry at startup. glTF
     # scenes are spawned by reflection-cloning their entities, so without this scene spawn panics on
     # the first unregistered type (Transform, Visibility, Mesh3d, ...). A Bevy default we lost above.
