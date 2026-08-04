@@ -30,7 +30,19 @@ pub struct HidConn {
     pub product_name: String,
     /// `Mutex` makes the `!Sync` `Receiver` usable inside a Bevy resource.
     rx: Mutex<Receiver<Vec<u8>>>,
+    /// When the last report arrived (= open time until the first one). A connection that stays
+    /// silent past `HID_SILENCE_TIMEOUT` is a ZOMBIE — after a USB re-enumeration the old hidraw
+    /// node often reopens successfully but never streams again — and gets dropped so the
+    /// auto-reconnect can grab the device's NEW node (fresh enumeration by name).
+    last_report: std::time::Instant,
 }
+
+/// Silence window after which an open connection is declared dead (RC dongles stream
+/// continuously at a fixed rate, so a healthy link is never quiet this long).
+const HID_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often the in-game auto-reconnect retries empty slots (seconds).
+const HID_RECONNECT_PERIOD: f32 = 2.0;
 
 /// Per-player HID connections; slot `p` is `Some` only while player `p` has a device connected.
 #[derive(Resource)]
@@ -56,6 +68,13 @@ impl Plugin for InputPlugin {
         // Reconnect last-used transmitters once the game mode is known (not at Startup).
         app.add_systems(OnEnter(AppState::Playing), reconcile_hid);
         app.add_systems(Update, hid_poll_system);
+        // In-game auto-reconnect: a transmitter that drops mid-flight (USB hiccup / cable) is
+        // re-bound by NAME with a fresh enumeration — the re-enumerated device usually comes
+        // back on a DIFFERENT hidraw node, so the remembered path is useless.
+        app.add_systems(
+            Update,
+            auto_reconnect_hid.run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -93,8 +112,17 @@ pub fn connect_hid(
     // Bind this slot's controller to the device + load ITS saved config (mapping/calibration) by
     // name, so the transmitter behaves the same in any player slot / game mode.
     ctrl.set_device(&product_name);
+    // The new link must prove itself with actual data: `hid_connected` flips true on the first
+    // report (feed_hid_report). Without this reset a zombie reopen would keep driving the player
+    // with the stale "connected" flag from before the drop.
+    ctrl.hid_connected = false;
     info!("[HID] P{} connected: {} ({:?})", player + 1, product_name, path);
-    conns.0[player] = Some(HidConn { path, product_name, rx: Mutex::new(rx) });
+    conns.0[player] = Some(HidConn {
+        path,
+        product_name,
+        rx: Mutex::new(rx),
+        last_report: std::time::Instant::now(),
+    });
     Ok(())
 }
 
@@ -157,18 +185,24 @@ fn reconcile_hid(
 }
 
 /// `Update` (always): drain each player's queued HID reports into its controller; drop a connection
-/// whose reader thread has exited (keeping the saved path for auto-reconnect). Also services the
+/// whose reader thread has exited OR has gone silent past `HID_SILENCE_TIMEOUT` (a zombie reopen
+/// after USB re-enumeration), keeping the saved name for auto-reconnect. Also services the
 /// settings-UI channel-assignment "listen" mode per controller.
 fn hid_poll_system(mut conns: ResMut<HidConnections>, mut ctrl: ResMut<ControllerRes>) {
     for player in 0..NUM_PLAYERS {
         let mut has_conn = false;
         let mut disconnected = false;
-        if let Some(conn) = &conns.0[player] {
+        let mut zombie = false;
+        if let Some(conn) = conns.0[player].as_mut() {
             has_conn = true;
+            let mut got_data = false;
             if let Ok(rx) = conn.rx.lock() {
                 loop {
                     match rx.try_recv() {
-                        Ok(report) => ctrl.0[player].feed_hid_report(&report),
+                        Ok(report) => {
+                            ctrl.0[player].feed_hid_report(&report);
+                            got_data = true;
+                        }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             disconnected = true;
@@ -177,6 +211,13 @@ fn hid_poll_system(mut conns: ResMut<HidConnections>, mut ctrl: ResMut<Controlle
                     }
                 }
             }
+            if got_data {
+                conn.last_report = std::time::Instant::now();
+            } else if !disconnected && conn.last_report.elapsed() > HID_SILENCE_TIMEOUT {
+                // Open but mute: RC dongles stream continuously, so a silent link is dead —
+                // typically the pre-re-enumeration hidraw node that reopened as a zombie.
+                zombie = true;
+            }
         }
         if !has_conn {
             if ctrl.0[player].hid_connected {
@@ -184,13 +225,74 @@ fn hid_poll_system(mut conns: ResMut<HidConnections>, mut ctrl: ResMut<Controlle
             }
             continue;
         }
-        if disconnected {
+        if disconnected || zombie {
             let path = conns.0[player].as_ref().map(|c| c.path.clone());
-            warn!("[HID] P{} device {:?} disconnected (reader thread exited)", player + 1, path);
+            warn!(
+                "[HID] P{} device {:?} {} — dropping connection (auto-reconnect will retry)",
+                player + 1,
+                path,
+                if zombie { "silent (zombie link)" } else { "disconnected (reader thread exited)" }
+            );
             ctrl.0[player].hid_connected = false;
-            conns.0[player] = None; // keep saved path for auto-reconnect next launch
+            conns.0[player] = None; // keep saved name so auto_reconnect_hid can re-bind
         } else {
             ctrl.0[player].poll_listen();
+        }
+    }
+}
+
+/// `Update` (Playing, every `HID_RECONNECT_PERIOD`s): re-bind empty ACTIVE slots to their
+/// remembered transmitter by NAME using a FRESH enumeration — after a mid-game USB drop the
+/// device usually re-enumerates on a new hidraw path, so the old path is useless. Candidates
+/// whose path is already bound to another player are skipped (two same-model transmitters
+/// share a product name, e.g. dual 'RADIOMASTER SIM' dongles).
+fn auto_reconnect_hid(
+    time: Res<Time>,
+    mode: Res<GameMode>,
+    mut conns: ResMut<HidConnections>,
+    mut ctrl: ResMut<ControllerRes>,
+    mut cooldown: Local<f32>,
+) {
+    let active = match *mode {
+        GameMode::SinglePlayer => 1,
+        GameMode::DualPlayer => 2,
+    };
+    // Nothing to do while every active slot is connected (avoid the enumeration cost).
+    if (0..active).all(|s| conns.0[s].is_some()) {
+        *cooldown = 0.0;
+        return;
+    }
+    *cooldown -= time.delta_secs();
+    if *cooldown > 0.0 {
+        return;
+    }
+    *cooldown = HID_RECONNECT_PERIOD;
+    let devices = list_rc_devices();
+    for slot in 0..active {
+        if conns.0[slot].is_some() {
+            continue;
+        }
+        let Some(name) = persistence::load_last_device(slot_key(*mode, slot)) else {
+            continue;
+        };
+        // Try every same-named candidate not already held by another player — the first
+        // healthy open wins; a zombie pick gets dropped by the silence check and retried.
+        for dev in devices.iter().filter(|d| d.product_name == name) {
+            let taken = conns
+                .0
+                .iter()
+                .any(|c| c.as_ref().is_some_and(|c| c.path == dev.path));
+            if taken {
+                continue;
+            }
+            let (path, pname) = (dev.path.clone(), dev.product_name.clone());
+            match connect_hid(&mut conns, &mut ctrl.0[slot], slot, active, path, pname) {
+                Ok(()) => {
+                    info!("[HID] P{} auto-reconnected to '{}'", slot + 1, name);
+                    break;
+                }
+                Err(e) => warn!("[HID] P{} auto-reconnect failed: {}", slot + 1, e),
+            }
         }
     }
 }
