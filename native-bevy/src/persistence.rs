@@ -194,8 +194,24 @@ pub struct ControllerConfig {
     pub switch_inverted: [bool; 2],
     pub switch_level_mode: [bool; 2],
     pub switch_threshold: f32,
+    /// Fire switch (battle trigger) — separate `#[serde(default)]` fields (not widened arrays)
+    /// so configs saved before the fire switch existed still deserialize.
+    #[serde(default = "default_fire_channel")]
+    pub fire_channel: i32,
+    #[serde(default)]
+    pub fire_inverted: bool,
+    #[serde(default = "default_fire_level_mode")]
+    pub fire_level_mode: bool,
     /// `[min, max]` per channel (`None` until learned during calibration).
     pub calibration: Vec<[Option<u16>; 2]>,
+}
+
+/// Fire switch defaults for legacy configs: unassigned channel, LEVEL (fire while held).
+fn default_fire_channel() -> i32 {
+    -1
+}
+fn default_fire_level_mode() -> bool {
+    true
 }
 
 /// `controllers/` subdir holding one JSON per known transmitter.

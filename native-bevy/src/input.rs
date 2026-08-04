@@ -72,12 +72,13 @@ impl ChannelCalibration {
 
 /// Axis names for display (indices 0-3).
 pub const AXIS_NAMES: [&str; 4] = ["Roll", "Pitch", "Throttle", "Yaw"];
-/// Switch names for display (indices 0-1).
-pub const SWITCH_NAMES: [&str; 2] = ["Arm", "Mode"];
+/// Switch names for display (indices 0-2).
+pub const SWITCH_NAMES: [&str; 3] = ["Arm", "Mode", "Fire"];
 
 /// Listen-target sentinels for [`Controller::start_listen`] (switches share the axis target space).
 pub const LISTEN_ARM: usize = 10;
 pub const LISTEN_MODE: usize = 11;
+pub const LISTEN_FIRE: usize = 12;
 
 pub struct Controller {
     /// Axis mappings: roll, pitch, throttle, yaw (indices 0-3).
@@ -86,12 +87,12 @@ pub struct Controller {
     pub mode_expo: [[f32; 4]; 2],
     /// Per-mode rate (same layout as `mode_expo`).
     pub mode_rate: [[f32; 4]; 2],
-    /// Switch channels: arm (0), mode (1). `-1` = unassigned.
-    pub switch_channels: [i32; 2],
-    pub switch_inverted: [bool; 2],
+    /// Switch channels: arm (0), mode (1), fire (2, battle trigger). `-1` = unassigned.
+    pub switch_channels: [i32; 3],
+    pub switch_inverted: [bool; 3],
     pub switch_threshold: f32,
     /// `false` = toggle (rising edge flips), `true` = level (follows 2-pos switch).
-    pub switch_level_mode: [bool; 2],
+    pub switch_level_mode: [bool; 3],
 
     // HID state
     pub hid_axes: [f32; MAX_CHANNELS],
@@ -106,8 +107,12 @@ pub struct Controller {
     pub boost: bool,
     prev_arm_state: bool,
     prev_mode_state: bool,
+    prev_fire_state: bool,
     pub mode_switch_triggered: bool,
     pub reset_triggered: bool,
+    /// Battle trigger held (fire switch). Level mode (default): true while the switch is high.
+    /// Toggle mode: each rising edge flips auto-fire on/off. Read by `battle_fire_system`.
+    pub fire_active: bool,
 
     /// Auto-learn min/max while true.
     pub calibrating: bool,
@@ -139,10 +144,12 @@ impl Controller {
             ],
             mode_expo: [[0.0; 4]; 2],
             mode_rate: [[1.0; 4]; 2],
-            switch_channels: [-1, -1],
-            switch_inverted: [false, false],
+            switch_channels: [-1, -1, -1],
+            switch_inverted: [false, false, false],
             switch_threshold: 0.5,
-            switch_level_mode: [false, false],
+            // Fire defaults to LEVEL: a momentary/2-pos switch fires while held — the natural
+            // trigger feel (Arm/Mode keep toggle as their default).
+            switch_level_mode: [false, false, true],
 
             hid_axes: [0.0; MAX_CHANNELS],
             hid_raw: [0; MAX_CHANNELS],
@@ -154,8 +161,10 @@ impl Controller {
             boost: false,
             prev_arm_state: false,
             prev_mode_state: false,
+            prev_fire_state: false,
             mode_switch_triggered: false,
             reset_triggered: false,
+            fire_active: false,
 
             calibrating: false,
             current_mode: 0,
@@ -182,11 +191,12 @@ impl Controller {
         }
     }
 
-    /// Forget the bound device (on disconnect): drop the name + persisted flag + live flag.
+    /// Forget the bound device (on disconnect): drop the name + persisted flag + live flags.
     pub fn clear_device(&mut self) {
         self.device_name = None;
         self.config_persisted = false;
         self.hid_connected = false;
+        self.fire_active = false;
     }
 
     /// Reset mapping / switches / expo / rate / calibration to factory defaults.
@@ -199,16 +209,18 @@ impl Controller {
         ];
         self.mode_expo = [[0.0; 4]; 2];
         self.mode_rate = [[1.0; 4]; 2];
-        self.switch_channels = [-1, -1];
-        self.switch_inverted = [false, false];
+        self.switch_channels = [-1, -1, -1];
+        self.switch_inverted = [false, false, false];
         self.switch_threshold = 0.5;
-        self.switch_level_mode = [false, false];
+        self.switch_level_mode = [false, false, true];
         for c in self.calibration.iter_mut() {
             *c = ChannelCalibration::default();
         }
     }
 
     /// Snapshot the current mapping / switches / expo / rate / calibration for persistence.
+    /// Arm/Mode keep the legacy 2-wide arrays; the fire switch persists via the separate
+    /// `fire_*` fields so configs saved before it existed still deserialize.
     pub fn export_config(&self) -> crate::persistence::ControllerConfig {
         crate::persistence::ControllerConfig {
             axis_channels: std::array::from_fn(|i| self.axis_map[i].channel),
@@ -217,10 +229,13 @@ impl Controller {
             axis_expo_drone: self.mode_expo[1],
             axis_rate_fpv: self.mode_rate[0],
             axis_rate_drone: self.mode_rate[1],
-            switch_channels: self.switch_channels,
-            switch_inverted: self.switch_inverted,
-            switch_level_mode: self.switch_level_mode,
+            switch_channels: [self.switch_channels[0], self.switch_channels[1]],
+            switch_inverted: [self.switch_inverted[0], self.switch_inverted[1]],
+            switch_level_mode: [self.switch_level_mode[0], self.switch_level_mode[1]],
             switch_threshold: self.switch_threshold,
+            fire_channel: self.switch_channels[2],
+            fire_inverted: self.switch_inverted[2],
+            fire_level_mode: self.switch_level_mode[2],
             calibration: self.calibration.iter().map(|c| [c.min, c.max]).collect(),
         }
     }
@@ -235,9 +250,10 @@ impl Controller {
         self.mode_expo[1] = cfg.axis_expo_drone;
         self.mode_rate[0] = cfg.axis_rate_fpv;
         self.mode_rate[1] = cfg.axis_rate_drone;
-        self.switch_channels = cfg.switch_channels;
-        self.switch_inverted = cfg.switch_inverted;
-        self.switch_level_mode = cfg.switch_level_mode;
+        self.switch_channels = [cfg.switch_channels[0], cfg.switch_channels[1], cfg.fire_channel];
+        self.switch_inverted = [cfg.switch_inverted[0], cfg.switch_inverted[1], cfg.fire_inverted];
+        self.switch_level_mode =
+            [cfg.switch_level_mode[0], cfg.switch_level_mode[1], cfg.fire_level_mode];
         self.switch_threshold = cfg.switch_threshold;
         for (i, ch) in cfg.calibration.iter().enumerate() {
             if i < MAX_CHANNELS {
@@ -271,7 +287,7 @@ impl Controller {
     }
 
     /// Begin listening for a channel assignment: the next channel to move > 0.5 from its current
-    /// value gets assigned to `target` (`0-3` axis, `LISTEN_ARM`/`LISTEN_MODE` switch).
+    /// value gets assigned to `target` (`0-3` axis, `LISTEN_ARM`/`LISTEN_MODE`/`LISTEN_FIRE` switch).
     pub fn start_listen(&mut self, target: usize) {
         self.listen_baseline = self.hid_axes;
         self.listening = Some(target);
@@ -288,6 +304,8 @@ impl Controller {
                         self.switch_channels[0] = i as i32;
                     } else if target == LISTEN_MODE {
                         self.switch_channels[1] = i as i32;
+                    } else if target == LISTEN_FIRE {
+                        self.switch_channels[2] = i as i32;
                     }
                     self.listening = None;
                     self.persist_config_if_known();
@@ -399,6 +417,25 @@ impl Controller {
                         self.mode_switch_triggered = true;
                     }
                     self.prev_mode_state = state;
+                }
+            }
+
+            // Fire switch (battle trigger). Level (default): fires while held. Toggle: each
+            // rising edge flips auto-fire on/off.
+            if self.switch_channels[2] >= 0 {
+                let ch = self.switch_channels[2] as usize;
+                if ch < MAX_CHANNELS {
+                    let mut v = self.hid_axes[ch];
+                    if self.switch_inverted[2] {
+                        v = -v;
+                    }
+                    let state = v > self.switch_threshold;
+                    if self.switch_level_mode[2] {
+                        self.fire_active = state;
+                    } else if state && !self.prev_fire_state {
+                        self.fire_active = !self.fire_active;
+                    }
+                    self.prev_fire_state = state;
                 }
             }
         }

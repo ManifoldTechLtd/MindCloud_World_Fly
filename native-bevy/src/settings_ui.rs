@@ -7,7 +7,7 @@ use bevy_egui::egui::{self, Color32, RichText};
 
 use crate::drone::{Drone, FlightMode};
 use crate::input::{
-    Controller, HidDeviceInfo, AXIS_NAMES, LISTEN_ARM, LISTEN_MODE, MAX_CHANNELS, SWITCH_NAMES,
+    Controller, HidDeviceInfo, AXIS_NAMES, LISTEN_ARM, LISTEN_FIRE, LISTEN_MODE, MAX_CHANNELS, SWITCH_NAMES,
 };
 
 /// Device action requested by the HID section, applied by `flight::settings_ui_system`.
@@ -239,15 +239,19 @@ fn draw_hid_section(
             }
         });
 
-    egui::CollapsingHeader::new("Switches (Arm / Mode)")
+    egui::CollapsingHeader::new("Switches (Arm / Mode / Fire)")
         .default_open(true)
         .show(ui, |ui| {
             let mut changed = false;
-            for s in 0..2 {
+            for s in 0..3 {
                 ui.horizontal(|ui| {
                     ui.label(format!("{:<5}", SWITCH_NAMES[s]));
                     ui.label(format!("ch {:>2}", ctrl.switch_channels[s]));
-                    let target = if s == 0 { LISTEN_ARM } else { LISTEN_MODE };
+                    let target = match s {
+                        0 => LISTEN_ARM,
+                        1 => LISTEN_MODE,
+                        _ => LISTEN_FIRE,
+                    };
                     let listening = ctrl.listening == Some(target);
                     if ui.button(if listening { "…flip…" } else { "Listen" }).clicked() {
                         ctrl.start_listen(target);

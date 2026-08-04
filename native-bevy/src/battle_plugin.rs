@@ -137,12 +137,13 @@ fn setup_battle(
     info!("[Battle] setup: initialized (weapons lazy-init on first frame)");
 }
 
-/// Read fire input (LeftShift=P1, RightShift=P2) and spawn projectiles.
-/// Also lazily initializes weapons when `Players` first becomes available.
+/// Read fire input — keyboard (LeftShift=P1, RightShift=P2) OR the transmitter's mapped Fire
+/// switch — and spawn projectiles. Also lazily initializes weapons when `Players` first exists.
 fn battle_fire_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut battle: ResMut<BattleState>,
     players: Res<Players>,
+    ctrl: Res<crate::input_plugin::ControllerRes>,
     settings_open: Res<crate::flight::SettingsOpen>,
     menu: Res<crate::menu::MenuState>,
 ) {
@@ -164,7 +165,9 @@ fn battle_fire_system(
         if !p.armed {
             continue;
         }
-        if !keys.pressed(fire_keys[i]) {
+        // Keyboard OR the transmitter's Fire switch (mapped in F1 → Switches; level = hold).
+        let hid_fire = ctrl.0.get(i).is_some_and(|c| c.hid_connected && c.fire_active);
+        if !keys.pressed(fire_keys[i]) && !hid_fire {
             continue;
         }
         let d = &p.drone;
