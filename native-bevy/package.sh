@@ -37,6 +37,12 @@ if [ -d config ]; then
     cp -r config "$OUT/config"
 fi
 
+# RC-transmitter udev helper (repo root): target machines need it or Connect fails with
+# "permission denied" on /dev/hidraw* (regular users can't open HID nodes by default).
+if [ -f ../setup_udev.sh ]; then
+    cp ../setup_udev.sh "$OUT/setup_udev.sh"
+fi
+
 # Launcher: cd into the app directory first so assets/ and scene/ resolve correctly.
 cat > "$OUT/run.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -76,7 +82,12 @@ MindCloud World Fly — 便携版 (Linux)
 
 场景文件:放进 scene/ 文件夹 (*.ply)。
 设置与存档:保存在本程序目录的 config/ 文件夹 (与 assets/ 同级)，随包携带。
-遥控器 (可选):参见项目根目录的 setup_udev.sh。
+
+遥控器 (可选):
+  直接点击 Connect 报 "permission denied"? 先运行一次 (需要 sudo):
+      sudo bash setup_udev.sh
+  它会写入 udev 规则、把你加入 plugdev 组并刷新设备权限。
+  之后重新插拔遥控器即可 (若仍在旧会话,请先注销重登一次再启动程序)。
 
 注意:本可执行文件要求目标系统的 glibc 版本不低于构建这台机器。
 若启动时提示 "GLIBC_x.xx not found",请在更旧的发行版 (或旧容器) 上重新打包。
