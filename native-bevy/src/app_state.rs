@@ -43,7 +43,9 @@ pub enum GameMode {
 
 /// Game type: racing (existing physics) or battle (space-fighter, no gravity).
 /// Orthogonal to `GameMode` — combines with player count to select the activity.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Resource)]
+/// `ExtractResource`: mirrored into the render world each frame so the splat render node can
+/// gate battle-only work (the splat depth-only pass for shield occlusion).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Resource, bevy::render::extract_resource::ExtractResource)]
 pub enum GameType {
     #[default]
     Race,

@@ -179,7 +179,13 @@ impl Plugin for SplatPlugin {
             height: 720,
         });
         app.add_plugins(ExtractResourcePlugin::<SplatInitData>::default());
+        // Mirror GameType into the render world: the splat node runs its depth-only pass
+        // (shield-vs-splat occlusion) only in battle mode, keeping race mode cost-free.
+        app.add_plugins(ExtractResourcePlugin::<crate::app_state::GameType>::default());
         app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<SplatCamera>::default());
+        // SplitCamera tells the render-world depth pass WHICH player a view belongs to, so it
+        // can skip that player's own shield (never rendered to its own camera anyway).
+        app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<crate::scene::SplitCamera>::default());
         app.add_systems(Update, poll_splat_loading);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return; };
@@ -401,13 +407,14 @@ impl ViewNode for SplatNode {
         &'static bevy::render::camera::ExtractedCamera,
         &'static bevy::render::view::ExtractedView,
         &'static bevy::render::view::ViewDepthTexture,
+        Option<&'static crate::scene::SplitCamera>,
     );
 
     fn run(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, _splat_camera, extracted_camera, extracted_view, view_depth): QueryItem<Self::ViewQuery>,
+        (view_target, _splat_camera, extracted_camera, extracted_view, view_depth, split_cam): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), bevy::render::render_graph::NodeRunError> {
         let Some(gpu_state) = world.get_resource::<SplatGpuState>() else {
@@ -559,8 +566,112 @@ impl ViewNode for SplatNode {
             );
         }
 
+        // Battle-only: depth-only re-raster of the same sorted splats (vs_depth culls faint
+        // ones at the vertex stage, empty fragment keeps early-z on, depth WRITE enabled) so
+        // the splat scene leaves per-pixel reverse-Z depth for the transparent pass to test —
+        // this is what lets the translucent hit-sphere shield be occluded by 3DGS walls.
+        // Cost control: the pass is SCISSORED to the union of the OPPONENT shields' projected
+        // screen rects (from `ShieldWorldSpheres`) and skipped when no shield lands in this
+        // view — so it costs fill only where a shield could actually appear.
+        let battle = world
+            .get_resource::<crate::app_state::GameType>()
+            .is_some_and(|gt| *gt == crate::app_state::GameType::Battle);
+        let scissor = if battle {
+            world
+                .get_resource::<crate::battle_plugin::ShieldWorldSpheres>()
+                .and_then(|shields| {
+                    shield_scissor_rect(
+                        shields,
+                        split_cam.map(|s| s.index as usize).unwrap_or(0),
+                        extracted_view,
+                        (vp_x, vp_y, vp_w, vp_h),
+                    )
+                })
+        } else {
+            None
+        };
+        if let Some((sx, sy, sw, sh)) = scissor {
+            let renderer_ptr = &state.views.get(&key).unwrap().renderer as *const GaussianRenderer;
+            let mut depth_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("splat_depth_only"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store, // splat depth is DEPOSITED here
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            depth_pass.set_viewport(vp_x, vp_y, vp_w, vp_h, 0.0, 1.0);
+            depth_pass.set_scissor_rect(sx, sy, sw, sh);
+            unsafe {
+                (*renderer_ptr).render_depth(&mut depth_pass, &*pc_ptr);
+            }
+        }
+
         render_context.add_command_buffer(encoder.finish());
 
         Ok(())
     }
+}
+
+/// Project the OPPONENT shields (`owner != view_player`) into this view's viewport and return
+/// the pixel-clamped union rect `(x, y, w, h)`, or `None` when no shield is visible here — the
+/// caller then skips the splat depth-only pass entirely.
+fn shield_scissor_rect(
+    shields: &crate::battle_plugin::ShieldWorldSpheres,
+    view_player: usize,
+    extracted_view: &bevy::render::view::ExtractedView,
+    (vp_x, vp_y, vp_w, vp_h): (f32, f32, f32, f32),
+) -> Option<(u32, u32, u32, u32)> {
+    if shields.0.is_empty() {
+        return None;
+    }
+    let view_from_world = extracted_view.world_from_view.to_matrix().inverse();
+    let proj = extracted_view.clip_from_view;
+    let (m00, m11) = (proj.x_axis.x, proj.y_axis.y);
+    const MARGIN_PX: f32 = 16.0;
+    let (mut lo_x, mut lo_y) = (f32::MAX, f32::MAX);
+    let (mut hi_x, mut hi_y) = (f32::MIN, f32::MIN);
+    for &(owner, centre, radius) in &shields.0 {
+        if owner == view_player {
+            continue; // own shield is never rendered to this view (RenderLayers)
+        }
+        let pv = view_from_world * centre.extend(1.0);
+        let dist = -pv.z; // Bevy view space looks down -Z
+        if dist <= -radius {
+            continue; // fully behind the camera
+        }
+        if dist <= radius {
+            // Camera inside / grazing the shield: cover the whole viewport this frame.
+            return Some((vp_x as u32, vp_y as u32, vp_w.max(1.0) as u32, vp_h.max(1.0) as u32));
+        }
+        // Perspective projection of the sphere centre + conservative radius in pixels.
+        let ndc_x = (pv.x * m00) / dist;
+        let ndc_y = (pv.y * m11) / dist;
+        let sx = vp_x + (ndc_x * 0.5 + 0.5) * vp_w;
+        let sy = vp_y + (0.5 - ndc_y * 0.5) * vp_h; // NDC +Y up -> screen +Y down
+        let r_px = (radius * m00 / dist * 0.5 * vp_w)
+            .max(radius * m11 / dist * 0.5 * vp_h)
+            + MARGIN_PX;
+        lo_x = lo_x.min(sx - r_px);
+        hi_x = hi_x.max(sx + r_px);
+        lo_y = lo_y.min(sy - r_px);
+        hi_y = hi_y.max(sy + r_px);
+    }
+    if lo_x >= hi_x || lo_y >= hi_y {
+        return None;
+    }
+    // Clamp to the viewport; a fully off-screen rect collapses and is skipped.
+    let cx0 = lo_x.max(vp_x);
+    let cy0 = lo_y.max(vp_y);
+    let cx1 = hi_x.min(vp_x + vp_w);
+    let cy1 = hi_y.min(vp_y + vp_h);
+    if cx1 - cx0 < 1.0 || cy1 - cy0 < 1.0 {
+        return None;
+    }
+    Some((cx0 as u32, cy0 as u32, (cx1 - cx0) as u32, (cy1 - cy0) as u32))
 }

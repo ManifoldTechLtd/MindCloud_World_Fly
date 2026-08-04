@@ -16,6 +16,10 @@ use cgmath::{EuclideanSpace, Matrix4, Point3, SquareMatrix, Vector2, Vector4};
 
 pub struct GaussianRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// Depth-only variant (fs_depth, no color targets, depth WRITE on): lays down per-pixel
+    /// splat depth after the color raster so later transparent meshes can depth-test against
+    /// the 3DGS scene. Built only when `new_with_depth` got a depth format.
+    depth_pipeline: Option<wgpu::RenderPipeline>,
     camera: UniformBuffer<CameraUniform>,
 
     render_settings: UniformBuffer<SplattingArgsUniform>,
@@ -123,6 +127,52 @@ impl GaussianRenderer {
             multiview: None,
         });
 
+        // Depth-only twin pipeline: vs_depth collapses faint splats at the VERTEX stage and
+        // fs_depth is empty (no discard) so hardware early-z stays enabled — with the
+        // front-to-back sort, covered splats cost zero fragment work. No color targets;
+        // unlike the color pipeline above, depth WRITE is enabled. Running it after the color
+        // raster deposits the splat scene's per-pixel reverse-Z depth so transparent meshes
+        // drawn later can be occluded by the 3DGS background.
+        let depth_pipeline = depth_format.map(|format| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("splat depth-only pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_depth"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_depth"),
+                    targets: &[],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: true,
+                    // Reverse-Z Greater: keeps the nearest solid splat (and anything already
+                    // nearer in the mesh depth wins automatically).
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                cache: None,
+                multiview: None,
+            })
+        });
+
         let draw_indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("indirect draw buffer"),
             size: std::mem::size_of::<wgpu::util::DrawIndirectArgs>() as u64,
@@ -149,6 +199,7 @@ impl GaussianRenderer {
         let preprocess = PreprocessPipeline::new(device, sh_deg, compressed);
         GaussianRenderer {
             pipeline,
+            depth_pipeline,
             camera,
             preprocess,
             draw_indirect_buffer,
@@ -296,6 +347,24 @@ impl GaussianRenderer {
         render_pass.set_bind_group(0, pc.render_bind_group(), &[]);
         render_pass.set_bind_group(1, &self.sorter_suff.as_ref().unwrap().sorter_render_bg, &[]);
         render_pass.set_pipeline(&self.pipeline);
+
+        render_pass.draw_indirect(&self.draw_indirect_buffer, 0);
+    }
+
+    /// Depth-only raster of the same prepared/sorted splats (see `depth_pipeline`). The caller
+    /// records this into a pass with NO color attachments and the target depth buffer attached
+    /// writable. No-op when the renderer was built without a depth format.
+    pub fn render_depth<'rpass>(
+        &'rpass self,
+        render_pass: &mut wgpu::RenderPass<'rpass>,
+        pc: &'rpass PointCloud,
+    ) {
+        let Some(pipeline) = &self.depth_pipeline else {
+            return;
+        };
+        render_pass.set_bind_group(0, pc.render_bind_group(), &[]);
+        render_pass.set_bind_group(1, &self.sorter_suff.as_ref().unwrap().sorter_render_bg, &[]);
+        render_pass.set_pipeline(pipeline);
 
         render_pass.draw_indirect(&self.draw_indirect_buffer, 0);
     }

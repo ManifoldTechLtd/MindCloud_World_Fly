@@ -46,6 +46,14 @@ const PROJECTILE_G: f32 = 9.81;
 /// Hit-marker flash duration (s): how long the white X shows after landing a shot.
 const HIT_MARKER_SECS: f32 = 0.3;
 
+/// Alive shields' world spheres `(owner player, centre, radius incl. pulse margin)`, refreshed
+/// every frame by `battle_hit_sphere_system` and mirrored into the render world: the splat
+/// depth-only pass (shield-vs-3DGS occlusion) scissors to these projected screen rects — and
+/// skips entirely when none apply to a view — so its cost tracks the shield's screen size
+/// instead of the whole viewport.
+#[derive(Resource, Clone, Default, bevy::render::extract_resource::ExtractResource)]
+pub struct ShieldWorldSpheres(pub Vec<(usize, Vec3, f32)>);
+
 /// "Got hit" hit-sphere flash duration (s): colour/opacity pulse when a shot lands on you.
 const HURT_FLASH_SECS: f32 = 0.35;
 
@@ -65,6 +73,10 @@ pub struct BattlePlugin;
 impl Plugin for BattlePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::Playing), setup_battle);
+        app.init_resource::<ShieldWorldSpheres>();
+        app.add_plugins(
+            bevy::render::extract_resource::ExtractResourcePlugin::<ShieldWorldSpheres>::default(),
+        );
         app.add_systems(
             Update,
             (
@@ -94,7 +106,11 @@ fn setup_battle(
     game_type: Res<GameType>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut shield_spheres: ResMut<ShieldWorldSpheres>,
 ) {
+    // Fresh session: drop any shield rects left over from a previous match (they gate the
+    // splat depth-only pass in the render world).
+    shield_spheres.0.clear();
     if *game_type != GameType::Battle {
         return;
     }
@@ -312,6 +328,7 @@ fn battle_hit_sphere_system(
     players: Res<Players>,
     config: Res<CurrentSceneConfig>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut shield_spheres: ResMut<ShieldWorldSpheres>,
     mut spheres: Query<(&HitSphereVisual, &mut Transform, &mut Visibility, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     // Same world-up lift as the hit test, so the visual shell IS the judgement volume.
@@ -319,6 +336,7 @@ fn battle_hit_sphere_system(
         WorldUp::Zup => Vec3::new(0.0, 0.0, BATTLE_HIT_CENTER_LIFT),
         WorldUp::Colmap => Vec3::new(0.0, -BATTLE_HIT_CENTER_LIFT, 0.0),
     };
+    shield_spheres.0.clear();
     for (hs, mut tf, mut vis, mat) in &mut spheres {
         let Some(p) = players.0.get(hs.player) else {
             *vis = Visibility::Hidden; // inactive slot (e.g. P2 in single player)
@@ -329,6 +347,10 @@ fn battle_hit_sphere_system(
         *vis = if alive { Visibility::Inherited } else { Visibility::Hidden };
         let d = &p.drone;
         tf.translation = Vec3::new(d.x, d.y, d.z) + lift;
+        if alive {
+            // 1.15 margin covers the 12% hit pulse; consumed by the splat depth-pass scissor.
+            shield_spheres.0.push((hs.player, tf.translation, BATTLE_HIT_RADIUS * 1.15));
+        }
         // "Got hit" feedback: bubble blends cyan→red, opacity 0.3→0.6, and pops out ~12%
         // (impact pulse), all easing back over HURT_FLASH_SECS.
         let t = battle

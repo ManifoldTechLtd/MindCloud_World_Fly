@@ -14,7 +14,9 @@ use crate::splat_plugin;
 pub(crate) struct SceneEntity;
 
 /// Marks a camera as one half of the split screen. `index` 0 = top, 1 = bottom.
-#[derive(Component)]
+/// `ExtractComponent`: mirrored into the render world so the splat depth-only pass can tell
+/// WHICH player a view belongs to (to skip that player's own shield when scissoring).
+#[derive(Component, Clone, bevy::render::extract_component::ExtractComponent)]
 pub(crate) struct SplitCamera {
     pub(crate) index: u8,
 }
