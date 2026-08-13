@@ -182,10 +182,15 @@ fn setup_scene(
     let drone_model = asset_server.load(GltfAssetLabel::Scene(0).from_asset(DRONE_MODEL_ASSET));
     // Child transform that stands the glTF model (native +Y up, -Z forward) upright facing the
     // parent's local +Y (heading): +90° about X, then DRONE_TILT_FIX to level this model's baked tilt,
-    // scaled by DRONE_MODEL_SCALE; `offset` is along local X.
-    let drone_child = |offset: f32| {
+    // scaled by DRONE_MODEL_SCALE; `offset` is along local X, `yaw` spins it about local Z (up) —
+    // battle previews face outward (±90°) to mirror the back-to-back duel spawn in `setup_flight`.
+    let drone_child = |offset: f32, yaw: f32| {
         Transform::from_xyz(offset, 0.0, 0.0)
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) * DRONE_TILT_FIX)
+            .with_rotation(
+                Quat::from_rotation_z(yaw)
+                    * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)
+                    * DRONE_TILT_FIX,
+            )
             .with_scale(Vec3::splat(DRONE_MODEL_SCALE))
     };
     // Heading arrow (split-screen only): a flat unlit double-sided isosceles prism + its mesh.
@@ -207,14 +212,19 @@ fn setup_scene(
         ))
         .with_children(|p| match *mode {
             GameMode::SinglePlayer => {
-                p.spawn((SceneRoot(drone_model.clone()), drone_child(0.0)));
+                p.spawn((SceneRoot(drone_model.clone()), drone_child(0.0, 0.0)));
             }
             GameMode::DualPlayer => {
                 let (mesh, mat) = arrow.clone().unwrap();
                 p.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::default()));
                 let d = crate::flight::SPLIT_SPAWN_OFFSET;
-                p.spawn((SceneRoot(drone_model.clone()), drone_child(-d))); // P1 (left)
-                p.spawn((SceneRoot(drone_model.clone()), drone_child(d))); // P2 (right)
+                // Battle: back-to-back duel preview — P1 faces local -X, P2 local +X (matching
+                // setup_flight's outward headings). Race: both face the arrow (+Y, yaw 0).
+                let battle = matches!(*game_type, crate::app_state::GameType::Battle);
+                let half = std::f32::consts::FRAC_PI_2;
+                let (y1, y2) = if battle { (half, -half) } else { (0.0, 0.0) };
+                p.spawn((SceneRoot(drone_model.clone()), drone_child(-d, y1))); // P1 (left)
+                p.spawn((SceneRoot(drone_model.clone()), drone_child(d, y2))); // P2 (right)
             }
         });
 

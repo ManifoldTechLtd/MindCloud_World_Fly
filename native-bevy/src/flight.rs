@@ -145,10 +145,10 @@ fn setup_flight(
 ) {
     let s = config.0.spawn;
     let is_battle = *game_type == crate::app_state::GameType::Battle;
-    let make = |offset: Vec3| -> Drone {
+    let make = |offset: Vec3, heading_deg: f32| -> Drone {
         let mut drone = Drone::new();
         drone.world_up = config.0.world_up;
-        drone.spawn_heading = config.0.heading_deg;
+        drone.spawn_heading = heading_deg;
         drone.battle_mode = is_battle;
         persistence::load_drone_settings(&mut drone);
         drone.reset(s[0] + offset.x, s[1] + offset.y, s[2] + offset.z);
@@ -160,7 +160,7 @@ fn setup_flight(
 
     let players = match *mode {
         GameMode::SinglePlayer => vec![PlayerState {
-            drone: make(Vec3::ZERO),
+            drone: make(Vec3::ZERO, config.0.heading_deg),
             keys: KeyState::default(),
             armed: false,
         }],
@@ -175,9 +175,21 @@ fn setup_flight(
                 WorldUp::Colmap => Vec3::new(h.sin(), 0.0, -h.cos()),
             };
             let d = SPLIT_SPAWN_OFFSET;
+            // Race: both face the arrow heading (side-by-side sprint to the same first gate).
+            // Battle: back-to-back duel — each faces OUTWARD along the lateral axis, so nobody
+            // starts with the opponent pre-centred. Heading yaw handedness differs per world-up
+            // (from the fwd formulas above): Zup +90° turns fwd onto +right, Colmap onto -right.
+            let (h1, h2) = if is_battle {
+                match config.0.world_up {
+                    WorldUp::Zup => (config.0.heading_deg - 90.0, config.0.heading_deg + 90.0),
+                    WorldUp::Colmap => (config.0.heading_deg + 90.0, config.0.heading_deg - 90.0),
+                }
+            } else {
+                (config.0.heading_deg, config.0.heading_deg)
+            };
             vec![
-                PlayerState { drone: make(-right * d), keys: KeyState::default(), armed: true },
-                PlayerState { drone: make(right * d), keys: KeyState::default(), armed: true },
+                PlayerState { drone: make(-right * d, h1), keys: KeyState::default(), armed: true },
+                PlayerState { drone: make(right * d, h2), keys: KeyState::default(), armed: true },
             ]
         }
     };
